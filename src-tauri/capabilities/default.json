@@ -19,6 +19,8 @@
     "core:window:allow-set-focus",
     "opener:default",
     "opener:allow-open-path",
-    "dialog:default"
+    "dialog:default",
+    "updater:default",
+    "process:allow-restart"
   ]
 }

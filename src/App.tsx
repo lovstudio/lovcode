@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 // Radix icons
 import { PersonIcon } from "@radix-ui/react-icons";
 import { GlobalHeader, VerticalFeatureTabs } from "./components/GlobalHeader";
+import { UpdateChecker } from "./components/UpdateChecker";
 import { setAutoCopyOnSelect, getAutoCopyOnSelect } from "./components/Terminal";
 import { Switch } from "./components/ui/switch";
 import { Avatar, AvatarImage, AvatarFallback } from "./components/ui/avatar";
@@ -435,6 +436,7 @@ function App() {
       </div>
     <AppSettingsDialog open={showSettings} onClose={() => setShowSettings(false)} />
     <ProfileDialog open={showProfileDialog} onClose={() => setShowProfileDialog(false)} profile={profile} onSave={setProfile} />
+    <UpdateChecker />
     </AppConfigContext.Provider>
   );
 }

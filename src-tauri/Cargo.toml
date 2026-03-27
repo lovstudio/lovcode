@@ -38,6 +38,8 @@ base64 = "0.22"
 arboard = "3"
 shell-escape = "0.1.5"
 libc = "0.2.179"
+tauri-plugin-updater = { version = "2", features = ["rustls-tls"] }
+tauri-plugin-process = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.26"
