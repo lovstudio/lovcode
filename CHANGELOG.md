@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.11
+
+### Patch Changes
+
+- 添加应用内自动更新功能
+
 ## 0.24.10
 
 ### Patch Changes
