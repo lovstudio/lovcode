@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.12
+
+### Patch Changes
+
+- feat(ProjectList): refactor to two-column master-detail layout with grouped/flat toggle
+
 ## 0.24.11
 
 ### Patch Changes
