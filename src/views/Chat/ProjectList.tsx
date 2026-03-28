@@ -1,300 +1,413 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { FileIcon, ChatBubbleIcon, ReloadIcon } from "@radix-ui/react-icons";
-import { Switch } from "../../components/ui/switch";
+import { ChevronDownIcon, ChevronRightIcon, DotsHorizontalIcon, ListBulletIcon, GroupIcon, MixIcon } from "@radix-ui/react-icons";
+import { Copy } from "lucide-react";
 import { useAtom } from "jotai";
-import { chatViewModeAtom, allProjectsSortByAtom, hideEmptySessionsAllAtom } from "../../store";
+import {
+  allProjectsSortByAtom,
+  hideEmptySessionsAllAtom,
+  originalChatAtom,
+  markdownPreviewAtom,
+} from "../../store";
 import { useAppConfig } from "../../context";
-import { VirtualChatList } from "./VirtualChatList";
-import { formatRelativeTime, useReadableText } from "./utils";
+import { useReadableText } from "./utils";
 import { useInvokeQuery } from "../../hooks";
-import type { Project, Session, ChatMessage, SearchResult, ChatsResponse } from "../../types";
+import { CollapsibleContent } from "./CollapsibleContent";
+import { ProjectLogo } from "../Workspace/ProjectLogo";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuLabel,
+} from "../../components/ui/dropdown-menu";
+import {
+  SessionDropdownMenuItems,
+} from "../../components/shared/SessionMenuItems";
+import { ExportDialog } from "./ExportDialog";
+import type { Project, Session, ChatMessage, Message } from "../../types";
 
 interface ProjectListProps {
   onSelectProject: (p: Project) => void;
   onSelectSession: (s: Session) => void;
-  onSelectChat: (c: ChatMessage) => void;
+  onSelectChat?: (c: ChatMessage) => void;
 }
 
-export function ProjectList({ onSelectProject, onSelectSession, onSelectChat }: ProjectListProps) {
-  const { formatPath } = useAppConfig();
-  const [viewMode, setViewMode] = useAtom(chatViewModeAtom);
+export function ProjectList({ onSelectProject, onSelectSession }: ProjectListProps) {
   const toReadable = useReadableText();
 
-  // Use react-query for cached data fetching
-  const { data: projects, isLoading: loadingProjects } = useInvokeQuery<Project[]>(["projects"], "list_projects");
-  const { data: allSessions, isLoading: loadingSessions } = useInvokeQuery<Session[]>(["sessions"], "list_all_sessions");
-  const { data: chatsResponse, isLoading: loadingChats } = useInvokeQuery<ChatsResponse>(["chats"], "list_all_chats", { limit: 50 });
-
-  // Local state for pagination (chats loaded beyond initial fetch)
-  const [extraChats, setExtraChats] = useState<ChatMessage[]>([]);
-  const [loadingMoreChats, setLoadingMoreChats] = useState(false);
-
-  const allChats = chatsResponse ? [...chatsResponse.items, ...extraChats] : null;
-  const totalChats = chatsResponse?.total ?? 0;
-  const CHATS_PAGE_SIZE = 50;
+  const { data: projects = [], isLoading: loadingProjects } = useInvokeQuery<Project[]>(["projects"], "list_projects");
+  const { data: allSessions = [], isLoading: loadingSessions } = useInvokeQuery<Session[]>(["sessions"], "list_all_sessions");
 
   const [sortBy, setSortBy] = useAtom(allProjectsSortByAtom);
   const [hideEmptySessions, setHideEmptySessions] = useAtom(hideEmptySessionsAllAtom);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [searchResults, setSearchResults] = useState<SearchResult[] | null>(null);
-  const [searching, setSearching] = useState(false);
-  const [indexBuilding, setIndexBuilding] = useState(false);
-  const [indexStatus, setIndexStatus] = useState<string | null>(null);
-  const [indexBuilt, setIndexBuilt] = useState(false);
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const [selectedSession, setSelectedSession] = useState<Session | null>(null);
+  const [grouped, setGrouped] = useState(true);
 
-  const loadMoreChats = useCallback(async () => {
-    if (loadingMoreChats || !allChats || allChats.length >= totalChats) return;
-    setLoadingMoreChats(true);
-    try {
-      const res = await invoke<ChatsResponse>("list_all_chats", {
-        limit: CHATS_PAGE_SIZE,
-        offset: allChats.length,
-      });
-      setExtraChats((prev) => [...prev, ...res.items]);
-    } finally {
-      setLoadingMoreChats(false);
-    }
-  }, [allChats, totalChats, loadingMoreChats]);
+  const loading = loadingProjects || loadingSessions;
 
-  const loading =
-    viewMode === "projects" ? loadingProjects : viewMode === "sessions" ? loadingSessions : loadingChats;
-
-  const handleBuildIndex = async () => {
-    setIndexBuilding(true);
-    setIndexStatus(null);
-    try {
-      await invoke<number>("build_search_index");
-      setIndexBuilt(true);
-    } catch (e) {
-      setIndexStatus(`Error: ${e}`);
-    } finally {
-      setIndexBuilding(false);
-    }
-  };
-
-  useEffect(() => {
-    if (!indexBuilt && !indexBuilding) {
-      handleBuildIndex();
-    }
-  }, [indexBuilt, indexBuilding]);
-
-  useEffect(() => {
-    if (viewMode !== "chats") return;
-    if (!searchQuery.trim()) {
-      setSearchResults(null);
-      return;
-    }
-    const timer = setTimeout(async () => {
-      setSearching(true);
-      try {
-        const results = await invoke<SearchResult[]>("search_chats", { query: searchQuery, limit: 50 });
-        setSearchResults(results);
-      } catch (e) {
-        if (String(e).includes("not built")) {
-          setIndexStatus("Search index not built. Click 'Build Index' to create it.");
-        }
-        setSearchResults([]);
-      } finally {
-        setSearching(false);
+  const sortedProjects = useMemo(() => {
+    const filtered = projects.filter((p) => p.session_count > 0);
+    return [...filtered].sort((a, b) => {
+      switch (sortBy) {
+        case "recent": return b.last_active - a.last_active;
+        case "sessions": return b.session_count - a.session_count;
+        case "name": return a.path.localeCompare(b.path);
       }
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [searchQuery, viewMode]);
+    });
+  }, [projects, sortBy]);
 
-  const sortedProjects = [...(projects || [])].sort((a, b) => {
-    switch (sortBy) {
-      case "recent":
-        return b.last_active - a.last_active;
-      case "sessions":
-        return b.session_count - a.session_count;
-      case "name":
-        return a.path.localeCompare(b.path);
+  const sessionsByProject = useMemo(() => {
+    const map = new Map<string, Session[]>();
+    const normalizePath = (p: string) => p.replace(/\/+$/, "");
+
+    for (const project of sortedProjects) {
+      const projectPathNorm = normalizePath(project.path);
+      const sessions = allSessions
+        .filter((s) => {
+          if (!s.project_path) return false;
+          if (hideEmptySessions && s.message_count === 0) return false;
+          return normalizePath(s.project_path) === projectPathNorm;
+        })
+        .sort((a, b) => {
+          switch (sortBy) {
+            case "recent": return b.last_modified - a.last_modified;
+            case "sessions": return b.message_count - a.message_count;
+            case "name": return (a.summary || "").localeCompare(b.summary || "");
+          }
+        });
+      map.set(project.id, sessions);
     }
-  });
+    return map;
+  }, [sortedProjects, allSessions, sortBy, hideEmptySessions]);
 
-  const filteredSessions = hideEmptySessions
-    ? (allSessions || []).filter((s) => s.message_count > 0)
-    : allSessions || [];
+  const flatSessions = useMemo(() => {
+    if (grouped) return [];
+    return allSessions
+      .filter((s) => s.message_count > 0 || !hideEmptySessions)
+      .sort((a, b) => {
+        switch (sortBy) {
+          case "recent": return b.last_modified - a.last_modified;
+          case "sessions": return b.message_count - a.message_count;
+          case "name": return (a.summary || "").localeCompare(b.summary || "");
+        }
+      });
+  }, [allSessions, sortBy, hideEmptySessions, grouped]);
 
-  const sortedSessions = [...filteredSessions].sort((a, b) => {
-    switch (sortBy) {
-      case "recent":
-        return b.last_modified - a.last_modified;
-      case "sessions":
-        return b.message_count - a.message_count;
-      case "name":
-        return (a.summary || "").localeCompare(b.summary || "");
-    }
-  });
+  const toggleCollapse = (id: string) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <p className="text-muted-foreground">Loading {viewMode}...</p>
+        <p className="text-muted-foreground">Loading...</p>
       </div>
     );
   }
 
   return (
-    <div className="px-6 py-8">
-      <header className="mb-6">
-        <h1 className="font-serif text-3xl font-semibold text-ink">Vibe Coding Chat History</h1>
-        <p className="text-muted-foreground mt-1">
-          {(projects || []).length} projects · {(allSessions || []).length} sessions · {totalChats} chats
-        </p>
-      </header>
+    <div className="flex h-full">
+      {/* Left Panel: Project Tree */}
+      <div className="w-80 shrink-0 border-r border-border overflow-y-auto">
+        <div className="px-4 py-4">
+          <h2 className="font-serif text-lg font-semibold text-ink mb-1">Chat History</h2>
+          <p className="text-xs text-muted-foreground mb-3">
+            {projects.length} projects · {allSessions.length} sessions
+          </p>
 
-      <div className="flex border-b border-border mb-4">
-        <button
-          onClick={() => setViewMode("projects")}
-          className={`px-4 py-2 text-sm font-medium transition-colors ${
-            viewMode === "projects"
-              ? "text-primary border-b-2 border-primary -mb-px"
-              : "text-muted-foreground hover:text-ink"
-          }`}
-        >
-          <FileIcon className="w-4 h-4 inline mr-1.5" />
-          Projects
-        </button>
-        <button
-          onClick={() => setViewMode("sessions")}
-          className={`px-4 py-2 text-sm font-medium transition-colors ${
-            viewMode === "sessions"
-              ? "text-primary border-b-2 border-primary -mb-px"
-              : "text-muted-foreground hover:text-ink"
-          }`}
-        >
-          <ChatBubbleIcon className="w-4 h-4 inline mr-1.5" />
-          Sessions
-        </button>
-        <button
-          onClick={() => setViewMode("chats")}
-          className={`px-4 py-2 text-sm font-medium transition-colors ${
-            viewMode === "chats"
-              ? "text-primary border-b-2 border-primary -mb-px"
-              : "text-muted-foreground hover:text-ink"
-          }`}
-        >
-          <ChatBubbleIcon className="w-4 h-4 inline mr-1.5" />
-          Chats
-        </button>
+          {/* Controls */}
+          <div className="flex items-center gap-1">
+            {/* Sort dropdown */}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs text-muted-foreground hover:text-ink hover:bg-card-alt transition-colors">
+                  <MixIcon className="w-3.5 h-3.5" />
+                  {sortBy === "name" ? "Name" : "Recent"}
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="min-w-[120px]">
+                <DropdownMenuLabel className="text-xs">Sort by</DropdownMenuLabel>
+                <DropdownMenuRadioGroup value={sortBy} onValueChange={(v) => setSortBy(v as typeof sortBy)}>
+                  <DropdownMenuRadioItem value="recent">Recent</DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem value="name">Name</DropdownMenuRadioItem>
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+
+            <div className="flex-1" />
+
+            {/* Grouped/Flat toggle */}
+            <button
+              onClick={() => setGrouped(!grouped)}
+              className={`p-1.5 rounded-md transition-colors ${grouped ? "bg-card-alt text-ink" : "text-muted-foreground hover:text-ink"}`}
+              title={grouped ? "Flat view" : "Grouped view"}
+            >
+              {grouped ? <GroupIcon className="w-3.5 h-3.5" /> : <ListBulletIcon className="w-3.5 h-3.5" />}
+            </button>
+
+            {/* Hide empty toggle */}
+            <button
+              onClick={() => setHideEmptySessions(!hideEmptySessions)}
+              className={`p-1.5 rounded-md transition-colors ${hideEmptySessions ? "bg-card-alt text-ink" : "text-muted-foreground hover:text-ink"}`}
+              title={hideEmptySessions ? "Show all sessions" : "Hide empty sessions"}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                {hideEmptySessions ? (
+                  <><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><path d="m2 2 20 20"/></>
+                ) : (
+                  <><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></>
+                )}
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        {/* Session List */}
+        <div className="px-2 pb-4 space-y-0.5">
+          {grouped ? (
+            // Grouped by project
+            sortedProjects.map((project) => {
+              const sessions = sessionsByProject.get(project.id) || [];
+              const isCollapsed = collapsedGroups.has(project.id);
+              const projectName = project.path.split("/").pop() || project.path;
+
+              return (
+                <div key={project.id}>
+                  <div
+                    className="group flex items-center gap-1.5 px-2 py-1.5 rounded-lg cursor-pointer transition-colors hover:bg-card-alt"
+                    onDoubleClick={() => onSelectProject(project)}
+                    onClick={() => toggleCollapse(project.id)}
+                  >
+                    <button className="p-0.5 text-muted-foreground">
+                      {isCollapsed ? (
+                        <ChevronRightIcon className="w-3.5 h-3.5" />
+                      ) : (
+                        <ChevronDownIcon className="w-3.5 h-3.5" />
+                      )}
+                    </button>
+                    <ProjectLogo projectPath={project.path} size="sm" />
+                    <span className="text-sm font-medium text-ink truncate flex-1" title={project.path}>
+                      {projectName}
+                    </span>
+                    <span className="text-xs text-muted-foreground">{sessions.length}</span>
+                  </div>
+                  {!isCollapsed && (
+                    <div className="ml-5 mt-0.5 space-y-0.5">
+                      {sessions.length === 0 ? (
+                        <div className="text-xs text-muted-foreground px-2 py-1">No sessions</div>
+                      ) : (
+                        sessions.map((session) => (
+                          <SessionItemButton
+                            key={session.id}
+                            session={session}
+                            isSelected={selectedSession?.id === session.id}
+                            onClick={() => setSelectedSession(session)}
+                            onDoubleClick={() => onSelectSession(session)}
+                            toReadable={toReadable}
+                          />
+                        ))
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })
+          ) : (
+            // Flat list
+            flatSessions.map((session) => (
+              <SessionItemButton
+                key={session.id}
+                session={session}
+                isSelected={selectedSession?.id === session.id}
+                onClick={() => setSelectedSession(session)}
+                onDoubleClick={() => onSelectSession(session)}
+                toReadable={toReadable}
+                showProject
+              />
+            ))
+          )}
+        </div>
       </div>
 
-      {viewMode !== "chats" && (
-        <div className="flex items-center justify-between gap-2 mb-6">
-          <div className="flex gap-2">
-            {(
-              [
-                ["recent", "Recent"],
-                ["sessions", viewMode === "projects" ? "Sessions" : "Messages"],
-                ["name", "Name"],
-              ] as const
-            ).map(([key, label]) => (
-              <button
-                key={key}
-                onClick={() => setSortBy(key)}
-                className={`px-3 py-1.5 rounded-lg text-sm transition-colors ${
-                  sortBy === key
-                    ? "bg-primary text-primary-foreground"
-                    : "bg-card-alt text-muted-foreground hover:text-ink"
-                }`}
-              >
-                {label}
+      {/* Right Panel: Session Detail */}
+      <div className="flex-1 overflow-y-auto">
+        {selectedSession ? (
+          <SessionDetail
+            session={selectedSession}
+            onOpen={() => onSelectSession(selectedSession)}
+          />
+        ) : (
+          <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
+            Select a session to preview
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// Session Item Button (shared between grouped & flat)
+// ============================================================================
+
+function SessionItemButton({
+  session,
+  isSelected,
+  onClick,
+  onDoubleClick,
+  toReadable,
+  showProject,
+}: {
+  session: Session;
+  isSelected: boolean;
+  onClick: () => void;
+  onDoubleClick: () => void;
+  toReadable: (s: string | null) => string;
+  showProject?: boolean;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      onDoubleClick={onDoubleClick}
+      className={`w-full text-left flex items-center gap-1.5 px-2 py-1 rounded text-xs transition-colors min-w-0 ${
+        isSelected
+          ? "bg-primary/10 text-ink"
+          : "text-muted-foreground hover:text-ink hover:bg-card-alt"
+      }`}
+    >
+      <div className="truncate flex-1 min-w-0">
+        <span className="truncate block">
+          {session.title || toReadable(session.summary) || "Untitled"}
+        </span>
+        {showProject && session.project_path && (
+          <span className="text-[10px] text-muted-foreground/60 truncate block">
+            {session.project_path.split("/").pop()}
+          </span>
+        )}
+      </div>
+      <span className="text-[10px] text-muted-foreground shrink-0">
+        {session.message_count}
+      </span>
+    </button>
+  );
+}
+
+// ============================================================================
+// Session Detail (right panel)
+// ============================================================================
+
+function SessionDetail({ session, onOpen }: { session: Session; onOpen: () => void }) {
+  const { formatPath } = useAppConfig();
+  const toReadable = useReadableText();
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [originalChat] = useAtom(originalChatAtom);
+  const [markdownPreview] = useAtom(markdownPreviewAtom);
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+
+  const displaySummary = session.title || toReadable(session.summary) || "Untitled";
+
+  useEffect(() => {
+    setLoading(true);
+    invoke<Message[]>("get_session_messages", {
+      projectId: session.project_id,
+      sessionId: session.id,
+    })
+      .then(setMessages)
+      .finally(() => setLoading(false));
+  }, [session.project_id, session.id]);
+
+  const filteredMessages = useMemo(
+    () => (originalChat ? messages.filter((m) => !m.is_meta && !m.is_tool) : messages),
+    [messages, originalChat]
+  );
+
+  const handleCopyContent = (content: string) => {
+    invoke("copy_to_clipboard", { text: content });
+  };
+
+  return (
+    <div className="px-6 py-6">
+      <header className="mb-6 flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <h2 className="font-serif text-xl font-semibold text-ink leading-tight mb-1 line-clamp-2">
+            {displaySummary}
+          </h2>
+          <p className="text-xs text-muted-foreground truncate">
+            {session.project_path ? formatPath(session.project_path) : session.project_id}
+            {" · "}
+            {session.message_count} messages
+          </p>
+        </div>
+        <div className="flex gap-2 shrink-0">
+          <button
+            onClick={onOpen}
+            className="px-3 py-1.5 rounded-lg text-xs bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+          >
+            Open
+          </button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button className="p-1.5 rounded-lg text-muted-foreground hover:bg-card-alt">
+                <DotsHorizontalIcon width={16} />
               </button>
-            ))}
-          </div>
-          {viewMode === "sessions" && (
-            <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer">
-              <Switch checked={hideEmptySessions} onCheckedChange={setHideEmptySessions} />
-              <span>Hide empty</span>
-            </label>
-          )}
-        </div>
-      )}
-
-      {viewMode === "chats" && (
-        <div className="mb-6 space-y-3">
-          <div className="flex gap-2">
-            <div className="flex-1 relative">
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search messages..."
-                className="w-full px-3 py-2 pr-8 rounded-lg bg-card border border-border text-ink placeholder:text-muted-foreground focus:outline-none focus:border-primary"
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-48">
+              <SessionDropdownMenuItems
+                projectId={session.project_id}
+                sessionId={session.id}
+                onExport={() => setExportDialogOpen(true)}
               />
-              {searching && (
-                <span className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">...</span>
-              )}
-            </div>
-            <button
-              onClick={handleBuildIndex}
-              disabled={indexBuilding}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-card-alt text-muted-foreground hover:text-ink border border-border transition-colors disabled:opacity-50"
-              title="Rebuild search index"
-            >
-              <ReloadIcon className={`w-4 h-4 ${indexBuilding ? "animate-spin" : ""}`} />
-              {indexBuilding ? "Building..." : "Rebuild"}
-            </button>
-          </div>
-          {indexStatus && <p className="text-xs text-muted-foreground">{indexStatus}</p>}
-          {searchQuery.trim() && searchResults !== null && (
-            <p className="text-xs text-muted-foreground">
-              {searchResults.length} result{searchResults.length !== 1 ? "s" : ""} found
-            </p>
-          )}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
-      )}
+      </header>
 
-      {viewMode === "projects" ? (
-        <div className="space-y-3">
-          {sortedProjects.map((project) => (
-            <button
-              key={project.id}
-              onClick={() => onSelectProject(project)}
-              className="w-full text-left bg-card rounded-xl p-4 border border-border hover:border-primary transition-colors"
-            >
-              <p className="font-medium text-ink truncate">{formatPath(project.path)}</p>
-              <p className="text-sm text-muted-foreground mt-1">
-                {project.session_count} session{project.session_count !== 1 ? "s" : ""} ·{" "}
-                {formatRelativeTime(project.last_active)}
-              </p>
-            </button>
-          ))}
-        </div>
-      ) : viewMode === "sessions" ? (
-        <div className="space-y-3">
-          {sortedSessions.map((session) => (
-            <button
-              key={`${session.project_id}-${session.id}`}
-              onClick={() => onSelectSession(session)}
-              className="w-full text-left bg-card rounded-xl p-4 border border-border hover:border-primary transition-colors"
-            >
-              <p className="font-medium text-ink line-clamp-2">{toReadable(session.summary) || "Untitled session"}</p>
-              <p className="text-sm text-muted-foreground mt-1 truncate">
-                {session.project_path ? formatPath(session.project_path) : session.project_id}
-              </p>
-              <p className="text-xs text-muted-foreground mt-1">
-                {session.message_count} messages · {formatRelativeTime(session.last_modified)}
-              </p>
-            </button>
-          ))}
+      {loading ? (
+        <div className="flex items-center justify-center py-12">
+          <p className="text-muted-foreground text-sm">Loading messages...</p>
         </div>
       ) : (
-        <VirtualChatList
-          chats={
-            searchResults !== null
-              ? [...searchResults].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-              : allChats || []
-          }
-          onSelectChat={onSelectChat}
-          formatPath={formatPath}
-          hasMore={searchResults === null && (allChats?.length || 0) < totalChats}
-          loadMore={loadMoreChats}
-          loadingMore={loadingMoreChats}
-        />
+        <div className="space-y-3">
+          {filteredMessages.map((msg) => {
+            const displayContent = toReadable(msg.content);
+            return (
+              <div
+                key={msg.uuid}
+                className={`group relative rounded-xl p-4 ${
+                  msg.role === "user" ? "bg-card-alt" : "bg-card border border-border"
+                }`}
+              >
+                <button
+                  onClick={() => handleCopyContent(displayContent)}
+                  className="absolute top-3 right-3 p-1.5 rounded-md bg-card-alt/80 hover:bg-card-alt text-muted-foreground hover:text-ink transition-opacity opacity-0 group-hover:opacity-100"
+                >
+                  <Copy size={14} />
+                </button>
+                <p className="text-xs text-muted-foreground mb-2 uppercase tracking-wide">{msg.role}</p>
+                <CollapsibleContent content={displayContent} markdown={markdownPreview} />
+              </div>
+            );
+          })}
+        </div>
       )}
+
+      <ExportDialog
+        open={exportDialogOpen}
+        onOpenChange={setExportDialogOpen}
+        allMessages={filteredMessages}
+        selectedIds={new Set()}
+        onSelectedIdsChange={() => {}}
+        defaultName={session.summary?.slice(0, 50).replace(/[/\\?%*:|"<>]/g, "-") || "session"}
+      />
     </div>
   );
 }

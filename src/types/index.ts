@@ -54,8 +54,10 @@ export interface Session {
   id: string;
   project_id: string;
   project_path: string | null;
+  title: string | null;
   summary: string | null;
   message_count: number;
+  created_at: number;
   last_modified: number;
   usage?: SessionUsage;
 }

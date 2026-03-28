@@ -182,8 +182,10 @@ pub struct Session {
     pub id: String,
     pub project_id: String,
     pub project_path: Option<String>,
+    pub title: Option<String>,
     pub summary: Option<String>,
     pub message_count: usize,
+    pub created_at: u64,
     pub last_modified: u64,
     pub usage: Option<SessionUsage>,
 }
@@ -222,6 +224,7 @@ struct RawLine {
     #[serde(rename = "type")]
     line_type: Option<String>,
     summary: Option<String>,
+    slug: Option<String>,
     uuid: Option<String>,
     message: Option<RawMessage>,
     timestamp: Option<String>,
@@ -481,22 +484,28 @@ async fn list_sessions(project_id: String) -> Result<Vec<Session>, String> {
             if name.ends_with(".jsonl") && !name.starts_with("agent-") {
                 let session_id = name.trim_end_matches(".jsonl").to_string();
 
-                // Only read head for summary (much faster)
-                let (summary, message_count) = read_session_head(&path, 20);
+                let head = read_session_head(&path, 20);
 
                 let metadata = fs::metadata(&path).ok();
-                let last_modified = metadata
+                let last_modified = metadata.as_ref()
                     .and_then(|m| m.modified().ok())
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
+                let created_at = metadata.as_ref()
+                    .and_then(|m| m.created().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(last_modified);
 
                 sessions.push(Session {
                     id: session_id,
                     project_id: project_id.clone(),
                     project_path: None,
-                    summary,
-                    message_count,
+                    title: head.title,
+                    summary: head.summary,
+                    message_count: head.message_count,
+                    created_at,
                     last_modified,
                     usage: None,
                 });
@@ -596,17 +605,39 @@ async fn get_sessions_usage(project_id: String) -> Result<Vec<SessionUsageEntry>
     .map_err(|e| e.to_string())?
 }
 
+/// Session head info parsed from first N lines
+struct SessionHead {
+    title: Option<String>,
+    summary: Option<String>,
+    message_count: usize,
+}
+
+/// Convert slug like "soft-petting-wave" to "Soft Petting Wave"
+fn slug_to_title(slug: &str) -> String {
+    slug.split('-')
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                Some(c) => format!("{}{}", c.to_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Read only the first N lines of a session file to get summary (much faster than reading entire file)
-fn read_session_head(path: &Path, max_lines: usize) -> (Option<String>, usize) {
+fn read_session_head(path: &Path, max_lines: usize) -> SessionHead {
     use std::io::{BufRead, BufReader};
 
     let file = match fs::File::open(path) {
         Ok(f) => f,
-        Err(_) => return (None, 0),
+        Err(_) => return SessionHead { title: None, summary: None, message_count: 0 },
     };
 
     let reader = BufReader::new(file);
     let mut summary = None;
+    let mut slug: Option<String> = None;
     let mut first_user_message: Option<String> = None;
     let mut message_count = 0;
 
@@ -616,6 +647,14 @@ fn read_session_head(path: &Path, max_lines: usize) -> (Option<String>, usize) {
             Err(_) => continue,
         };
         if let Ok(parsed) = serde_json::from_str::<RawLine>(&line) {
+            // Capture slug from any line that has it
+            if slug.is_none() {
+                if let Some(s) = &parsed.slug {
+                    if !s.is_empty() {
+                        slug = Some(s.clone());
+                    }
+                }
+            }
             if parsed.line_type.as_deref() == Some("summary") {
                 summary = parsed.summary;
             }
@@ -641,9 +680,7 @@ fn read_session_head(path: &Path, max_lines: usize) -> (Option<String>, usize) {
                                 _ => None,
                             };
                             if let Some(text) = text_content {
-                                // Apply restore_slash_command BEFORE truncation to preserve XML structure
                                 let restored = restore_slash_command(&text);
-                                // Truncate to reasonable length for display (UTF-8 safe)
                                 let display = if restored.chars().count() > 80 {
                                     format!("{}...", restored.chars().take(80).collect::<String>())
                                 } else {
@@ -661,9 +698,9 @@ fn read_session_head(path: &Path, max_lines: usize) -> (Option<String>, usize) {
         }
     }
 
-    // Use summary if available, otherwise fall back to first user message
+    let title = slug.map(|s| slug_to_title(&s));
     let final_summary = summary.or(first_user_message).map(|s| restore_slash_command(&s));
-    (final_summary, message_count)
+    SessionHead { title, summary: final_summary, message_count }
 }
 
 /// Convert <command-message>...</command-message><command-name>/cmd</command-name> to /cmd format
@@ -773,19 +810,22 @@ async fn list_all_sessions() -> Result<Vec<Session>, String> {
 
             seen_sessions.insert((project_id.clone(), session_id.clone()));
 
-            // Only read head for summary (first 20 lines should be enough)
-            let (summary, head_msg_count) = read_session_head(&session_path, 20);
+            let head = read_session_head(&session_path, 20);
 
-            // Use display as fallback summary (also needs restore_slash_command)
-            let final_summary = summary.or_else(|| display.clone().map(|d| restore_slash_command(&d)));
+            // Use display as fallback summary
+            let final_summary = head.summary.or_else(|| display.clone().map(|d| restore_slash_command(&d)));
 
-            // Use file mtime for accurate last_modified
             let metadata = fs::metadata(&session_path).ok();
-            let last_modified = metadata
+            let last_modified = metadata.as_ref()
                 .and_then(|m| m.modified().ok())
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs())
-                .unwrap_or(*timestamp / 1000); // fallback to history timestamp
+                .unwrap_or(*timestamp / 1000);
+            let created_at = metadata.as_ref()
+                .and_then(|m| m.created().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(last_modified);
 
             let display_path = decode_project_path(project_id);
 
@@ -793,8 +833,10 @@ async fn list_all_sessions() -> Result<Vec<Session>, String> {
                 id: session_id.clone(),
                 project_id: project_id.clone(),
                 project_path: Some(display_path),
+                title: head.title,
                 summary: final_summary,
-                message_count: head_msg_count, // approximate from head
+                message_count: head.message_count,
+                created_at,
                 last_modified,
                 usage: None,
             });
@@ -826,22 +868,28 @@ async fn list_all_sessions() -> Result<Vec<Session>, String> {
                         continue;
                     }
 
-                    // Read only head for summary
-                    let (summary, head_msg_count) = read_session_head(&path, 20);
+                    let head = read_session_head(&path, 20);
 
                     let metadata = fs::metadata(&path).ok();
-                    let last_modified = metadata
+                    let last_modified = metadata.as_ref()
                         .and_then(|m| m.modified().ok())
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
+                    let created_at = metadata.as_ref()
+                        .and_then(|m| m.created().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs())
+                        .unwrap_or(last_modified);
 
                     all_sessions.push(Session {
                         id: session_id,
                         project_id: project_id.clone(),
                         project_path: Some(display_path.clone()),
-                        summary,
-                        message_count: head_msg_count,
+                        title: head.title,
+                        summary: head.summary,
+                        message_count: head.message_count,
+                        created_at,
                         last_modified,
                         usage: None,
                     });
@@ -2678,8 +2726,10 @@ fn find_session_project(session_id: String) -> Result<Option<Session>, String> {
                 id: session_id,
                 project_id,
                 project_path: Some(display_path),
+                title: None,
                 summary,
                 message_count: 0,
+                created_at: 0,
                 last_modified: 0,
                 usage: None,
             }));
@@ -4774,8 +4824,8 @@ fn get_session_summary(project_id: String, session_id: String) -> Result<Option<
     if !path.exists() {
         return Err("Session file not found".to_string());
     }
-    let (summary, _) = read_session_head(&path, 20);
-    Ok(summary)
+    let head = read_session_head(&path, 20);
+    Ok(head.summary)
 }
 
 #[tauri::command]
@@ -6096,16 +6146,14 @@ async fn get_claude_code_version_info() -> Result<ClaudeCodeVersionInfo, String>
         })
         .collect();
 
-    // Check autoupdater setting
-    let settings_path = get_claude_dir().join("settings.json");
-    let autoupdater_disabled = fs::read_to_string(&settings_path)
+    // Check autoupdater setting from Claude Code's config (~/.claude.json)
+    let config_path = dirs::home_dir().unwrap().join(".claude.json");
+    let autoupdater_disabled = fs::read_to_string(&config_path)
         .ok()
         .and_then(|content| {
             let json: serde_json::Value = serde_json::from_str(&content).ok()?;
-            json.get("env")?
-                .get("DISABLE_AUTOUPDATER")?
-                .as_str()
-                .map(|s| s == "true" || s == "1")
+            // autoUpdates: false means autoupdater is disabled
+            json.get("autoUpdates")?.as_bool().map(|v| !v)
         })
         .unwrap_or(false);
 
@@ -6345,29 +6393,24 @@ fn cancel_claude_code_install() -> Result<(), String> {
 
 #[tauri::command]
 fn set_claude_code_autoupdater(disabled: bool) -> Result<(), String> {
-    let settings_path = get_claude_dir().join("settings.json");
+    let config_path = dirs::home_dir()
+        .ok_or("Could not determine home directory")?
+        .join(".claude.json");
 
-    // Read existing settings or create empty object
-    let mut settings: serde_json::Value = if settings_path.exists() {
-        let content = fs::read_to_string(&settings_path).map_err(|e| e.to_string())?;
+    // Read existing config or create empty object
+    let mut config: serde_json::Value = if config_path.exists() {
+        let content = fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
         serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
     } else {
         serde_json::json!({})
     };
 
-    // Ensure env object exists
-    if !settings.get("env").is_some() {
-        settings["env"] = serde_json::json!({});
-    }
-
-    // Set DISABLE_AUTOUPDATER
-    settings["env"]["DISABLE_AUTOUPDATER"] = serde_json::Value::String(
-        if disabled { "true".to_string() } else { "false".to_string() }
-    );
+    // Set autoUpdates (false = disabled, true = enabled)
+    config["autoUpdates"] = serde_json::Value::Bool(!disabled);
 
     // Write back
-    let content = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
-    fs::write(&settings_path, content).map_err(|e| e.to_string())?;
+    let content = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    fs::write(&config_path, content).map_err(|e| e.to_string())?;
 
     Ok(())
 }

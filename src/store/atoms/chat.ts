@@ -10,6 +10,12 @@ export const sessionSelectModeAtom = atomWithStorage("lovcode:sessionSelectMode"
 export const hideEmptySessionsAtom = atomWithStorage("lovcode-hide-empty-sessions", false);
 export const userPromptsOnlyAtom = atomWithStorage("lovcode:userPromptsOnly", false);
 
+// Sidebar session sort & view
+export type SessionSortBy = "modified" | "created" | "path";
+export const sidebarSessionSortByAtom = atomWithStorage<SessionSortBy>("lovcode:sidebar:sessionSortBy", "modified");
+export type SidebarViewMode = "grouped" | "flat";
+export const sidebarViewModeAtom = atomWithStorage<SidebarViewMode>("lovcode:sidebar:viewMode", "grouped");
+
 // ProjectList
 export const chatViewModeAtom = atomWithStorage<"projects" | "sessions" | "chats">("lovcode:chatViewMode", "projects");
 export const allProjectsSortByAtom = atomWithStorage<"name" | "recent" | "sessions">("lovcode:allProjects:sortBy", "recent");

@@ -12,6 +12,8 @@ export {
   originalChatAtom, markdownPreviewAtom,
   sessionContextTabAtom, sessionSelectModeAtom, hideEmptySessionsAtom, userPromptsOnlyAtom,
   chatViewModeAtom, allProjectsSortByAtom, hideEmptySessionsAllAtom,
+  sidebarSessionSortByAtom, type SessionSortBy,
+  sidebarViewModeAtom, type SidebarViewMode,
 } from "./atoms/chat";
 
 // Settings atoms

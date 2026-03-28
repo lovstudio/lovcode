@@ -84,7 +84,7 @@ export function GlobalHeader({
           </button>
         </div>
         {/* Center: menu group */}
-        <div className="flex-1 flex items-center justify-center gap-0.5">
+        <div className="flex-1 flex items-center justify-center gap-0.5" data-tauri-drag-region>
           <NavButton
             isActive={primaryFeature === null}
             onClick={() => { setPrimaryFeature(null); onNavigate({ type: "home" }); }}
