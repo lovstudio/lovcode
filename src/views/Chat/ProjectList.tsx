@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronDownIcon, ChevronRightIcon, DotsHorizontalIcon, ListBulletIcon, GroupIcon, MixIcon } from "@radix-ui/react-icons";
+import { ChevronDownIcon, ChevronRightIcon, DotsHorizontalIcon, ListBulletIcon, GroupIcon, MixIcon, MagnifyingGlassIcon } from "@radix-ui/react-icons";
 import { Copy } from "lucide-react";
 import { useAtom } from "jotai";
 import {
@@ -45,6 +45,47 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [grouped, setGrouped] = useState(true);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<Session[] | null>(null);
+  const [searching, setSearching] = useState(false);
+
+  // Full-text search across session summaries/titles + content via search_chats
+  useEffect(() => {
+    if (!searchQuery.trim()) {
+      setSearchResults(null);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      setSearching(true);
+      try {
+        // First filter locally by summary/title
+        const q = searchQuery.toLowerCase();
+        const localMatches = allSessions.filter((s) => {
+          const summary = (s.summary || "").toLowerCase();
+          const title = (s.title || "").toLowerCase();
+          return summary.includes(q) || title.includes(q);
+        });
+
+        // Also try full-text search for content matches
+        try {
+          const contentResults = await invoke<{ session_id: string; project_id: string }[]>(
+            "search_chats", { query: searchQuery, limit: 50 }
+          );
+          const contentSessionIds = new Set(contentResults.map((r) => r.session_id));
+          const contentMatches = allSessions.filter(
+            (s) => contentSessionIds.has(s.id) && !localMatches.some((m) => m.id === s.id)
+          );
+          setSearchResults([...localMatches, ...contentMatches]);
+        } catch {
+          // search index not built, use local matches only
+          setSearchResults(localMatches);
+        }
+      } finally {
+        setSearching(false);
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery, allSessions]);
 
   const loading = loadingProjects || loadingSessions;
 
@@ -123,6 +164,21 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
             {projects.length} projects · {allSessions.length} sessions
           </p>
 
+          {/* Search */}
+          <div className="relative mb-2">
+            <MagnifyingGlassIcon className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search sessions..."
+              className="w-full pl-8 pr-3 py-1.5 rounded-lg text-xs bg-card border border-border text-ink placeholder:text-muted-foreground focus:outline-none focus:border-primary"
+            />
+            {searching && (
+              <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground text-xs">...</span>
+            )}
+          </div>
+
           {/* Controls */}
           <div className="flex items-center gap-1">
             {/* Sort dropdown */}
@@ -172,7 +228,24 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
 
         {/* Session List */}
         <div className="px-2 pb-4 space-y-0.5">
-          {grouped ? (
+          {searchResults !== null ? (
+            // Search results (flat)
+            searchResults.length === 0 ? (
+              <div className="text-xs text-muted-foreground px-2 py-4 text-center">No results</div>
+            ) : (
+              searchResults.map((session) => (
+                <SessionItemButton
+                  key={session.id}
+                  session={session}
+                  isSelected={selectedSession?.id === session.id}
+                  onClick={() => setSelectedSession(session)}
+                  onDoubleClick={() => onSelectSession(session)}
+                  toReadable={toReadable}
+                  showProject
+                />
+              ))
+            )
+          ) : grouped ? (
             // Grouped by project
             sortedProjects.map((project) => {
               const sessions = sessionsByProject.get(project.id) || [];
