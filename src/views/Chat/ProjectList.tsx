@@ -48,6 +48,14 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<Session[] | null>(null);
   const [searching, setSearching] = useState(false);
+  const [indexReady, setIndexReady] = useState(false);
+
+  // Build search index on mount
+  useEffect(() => {
+    invoke<number>("build_search_index")
+      .then(() => setIndexReady(true))
+      .catch(() => {});
+  }, []);
 
   // Full-text search across session summaries/titles + content via search_chats
   useEffect(() => {
@@ -58,26 +66,26 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
     const timer = setTimeout(async () => {
       setSearching(true);
       try {
-        // First filter locally by summary/title
         const q = searchQuery.toLowerCase();
+        // Local matches by summary/title
         const localMatches = allSessions.filter((s) => {
           const summary = (s.summary || "").toLowerCase();
           const title = (s.title || "").toLowerCase();
           return summary.includes(q) || title.includes(q);
         });
 
-        // Also try full-text search for content matches
-        try {
-          const contentResults = await invoke<{ session_id: string; project_id: string }[]>(
-            "search_chats", { query: searchQuery, limit: 50 }
+        if (indexReady) {
+          // Full-text search for conversation content matches
+          const contentResults = await invoke<{ session_id: string }[]>(
+            "search_chats", { query: searchQuery, limit: 100 }
           );
-          const contentSessionIds = new Set(contentResults.map((r) => r.session_id));
-          const contentMatches = allSessions.filter(
-            (s) => contentSessionIds.has(s.id) && !localMatches.some((m) => m.id === s.id)
+          const localIds = new Set(localMatches.map((m) => m.id));
+          const contentSessionIds = new Set(
+            contentResults.map((r) => r.session_id).filter((id) => !localIds.has(id))
           );
+          const contentMatches = allSessions.filter((s) => contentSessionIds.has(s.id));
           setSearchResults([...localMatches, ...contentMatches]);
-        } catch {
-          // search index not built, use local matches only
+        } else {
           setSearchResults(localMatches);
         }
       } finally {
@@ -85,7 +93,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
       }
     }, 300);
     return () => clearTimeout(timer);
-  }, [searchQuery, allSessions]);
+  }, [searchQuery, allSessions, indexReady]);
 
   const loading = loadingProjects || loadingSessions;
 
@@ -171,7 +179,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search sessions..."
+              placeholder={indexReady ? "Search conversations..." : "Building search index..."}
               className="w-full pl-8 pr-3 py-1.5 rounded-lg text-xs bg-card border border-border text-ink placeholder:text-muted-foreground focus:outline-none focus:border-primary"
             />
             {searching && (
