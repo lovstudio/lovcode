@@ -13,6 +13,7 @@ import { useAppConfig } from "../../context";
 import { useReadableText } from "./utils";
 import { useInvokeQuery } from "../../hooks";
 import { CollapsibleContent } from "./CollapsibleContent";
+import { ContentBlockRenderer } from "./ContentBlockRenderer";
 import { ProjectLogo } from "../Workspace/ProjectLogo";
 import {
   DropdownMenu,
@@ -474,7 +475,11 @@ function SessionDetail({ session, onOpen }: { session: Session; onOpen: () => vo
                   <Copy size={14} />
                 </button>
                 <p className="text-xs text-muted-foreground mb-2 uppercase tracking-wide">{msg.role}</p>
-                <CollapsibleContent content={displayContent} markdown={markdownPreview} />
+                {msg.content_blocks && !originalChat ? (
+                  <ContentBlockRenderer blocks={msg.content_blocks} markdown={markdownPreview} />
+                ) : (
+                  <CollapsibleContent content={displayContent} markdown={markdownPreview} />
+                )}
               </div>
             );
           })}

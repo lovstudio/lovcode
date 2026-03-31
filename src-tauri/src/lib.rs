@@ -187,6 +187,19 @@ pub struct Session {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ContentBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "tool_use")]
+    ToolUse { id: String, name: String, summary: String },
+    #[serde(rename = "tool_result")]
+    ToolResult { tool_use_id: String, content: String },
+    #[serde(rename = "thinking")]
+    Thinking { thinking: String },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Message {
     pub uuid: String,
     pub role: String,
@@ -195,6 +208,7 @@ pub struct Message {
     pub is_meta: bool,  // slash command 展开的内容
     pub is_tool: bool,  // tool_use 或 tool_result
     pub line_number: usize,
+    pub content_blocks: Option<Vec<ContentBlock>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1053,6 +1067,7 @@ async fn get_session_messages(
                     if let Some(msg) = &parsed.message {
                         let role = msg.role.clone().unwrap_or_default();
                         let (content, is_tool) = extract_content_with_meta(&msg.content);
+                        let content_blocks = extract_content_blocks(&msg.content);
                         let is_meta = parsed.is_meta.unwrap_or(false);
 
                         if !content.is_empty() {
@@ -1064,6 +1079,7 @@ async fn get_session_messages(
                                 is_meta,
                                 is_tool,
                                 line_number: idx + 1,
+                                content_blocks,
                             });
                         }
                     }
@@ -1389,6 +1405,103 @@ fn search_chats(
     }
 
     Ok(results)
+}
+
+fn summarize_tool_input(name: &str, input: &serde_json::Value) -> String {
+    let obj = match input.as_object() {
+        Some(o) => o,
+        None => return String::new(),
+    };
+    match name {
+        "Read" | "Write" => obj.get("file_path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        "Edit" => {
+            let path = obj.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+            let old = obj.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
+            if old.is_empty() { path.to_string() } else {
+                format!("{} ({}...)", path, &old.chars().take(40).collect::<String>())
+            }
+        }
+        "Bash" => obj.get("command").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        "Grep" => obj.get("pattern").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        "Glob" => obj.get("pattern").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        "Task" => obj.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        "WebFetch" => obj.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        "WebSearch" => obj.get("query").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        _ => {
+            // Try common field names
+            for key in &["file_path", "path", "command", "query", "pattern", "url", "description"] {
+                if let Some(v) = obj.get(*key).and_then(|v| v.as_str()) {
+                    return v.to_string();
+                }
+            }
+            String::new()
+        }
+    }
+}
+
+fn extract_tool_result_content(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(arr) => {
+            arr.iter()
+                .filter_map(|item| {
+                    let obj = item.as_object()?;
+                    if obj.get("type").and_then(|v| v.as_str()) == Some("text") {
+                        obj.get("text").and_then(|v| v.as_str()).map(String::from)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        _ => String::new(),
+    }
+}
+
+fn extract_content_blocks(value: &Option<serde_json::Value>) -> Option<Vec<ContentBlock>> {
+    let arr = match value {
+        Some(serde_json::Value::Array(arr)) => arr,
+        Some(serde_json::Value::String(s)) => {
+            return Some(vec![ContentBlock::Text { text: s.clone() }]);
+        }
+        _ => return None,
+    };
+
+    let blocks: Vec<ContentBlock> = arr
+        .iter()
+        .filter_map(|item| {
+            let obj = item.as_object()?;
+            let block_type = obj.get("type").and_then(|v| v.as_str())?;
+            match block_type {
+                "text" => {
+                    let text = obj.get("text").and_then(|v| v.as_str())?.to_string();
+                    if text.is_empty() { None } else { Some(ContentBlock::Text { text }) }
+                }
+                "tool_use" => {
+                    let id = obj.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let input = obj.get("input").cloned().unwrap_or(serde_json::Value::Null);
+                    let summary = summarize_tool_input(&name, &input);
+                    Some(ContentBlock::ToolUse { id, name, summary })
+                }
+                "tool_result" => {
+                    let tool_use_id = obj.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let content = obj.get("content")
+                        .map(|v| extract_tool_result_content(v))
+                        .unwrap_or_default();
+                    Some(ContentBlock::ToolResult { tool_use_id, content })
+                }
+                "thinking" => {
+                    let thinking = obj.get("thinking").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    if thinking.is_empty() { None } else { Some(ContentBlock::Thinking { thinking }) }
+                }
+                _ => None,
+            }
+        })
+        .collect();
+
+    if blocks.is_empty() { None } else { Some(blocks) }
 }
 
 fn extract_content_with_meta(value: &Option<serde_json::Value>) -> (String, bool) {

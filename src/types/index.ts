@@ -67,6 +67,12 @@ export interface SessionUsageEntry {
   usage: SessionUsage;
 }
 
+export type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "tool_use"; id: string; name: string; summary: string }
+  | { type: "tool_result"; tool_use_id: string; content: string }
+  | { type: "thinking"; thinking: string };
+
 export interface Message {
   uuid: string;
   role: string;
@@ -75,6 +81,7 @@ export interface Message {
   is_meta: boolean;
   is_tool: boolean;
   line_number: number;
+  content_blocks?: ContentBlock[];
 }
 
 export interface ChatMessage {

@@ -20,6 +20,7 @@ import {
 import { useAtom } from "jotai";
 import { originalChatAtom, markdownPreviewAtom } from "../../store";
 import { CollapsibleContent } from "./CollapsibleContent";
+import { ContentBlockRenderer } from "./ContentBlockRenderer";
 import { ExportDialog } from "./ExportDialog";
 import { useReadableText } from "./utils";
 import { useAppConfig } from "../../context";
@@ -170,7 +171,11 @@ export function MessageView({ projectId, projectPath, sessionId, summary: initia
                 </DropdownMenuContent>
               </DropdownMenu>
               <p className="text-xs text-muted-foreground-foreground mb-2 uppercase tracking-wide">{msg.role}</p>
-              <CollapsibleContent content={displayContent} markdown={markdownPreview} />
+              {msg.content_blocks && !originalChat ? (
+                <ContentBlockRenderer blocks={msg.content_blocks} markdown={markdownPreview} />
+              ) : (
+                <CollapsibleContent content={displayContent} markdown={markdownPreview} />
+              )}
             </div>
           );
         })}
