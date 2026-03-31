@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useLayoutEffect, useRef } from "react";
 import Markdown from "react-markdown";
 
 interface CollapsibleContentProps {
@@ -11,7 +11,7 @@ export function CollapsibleContent({ content, markdown }: CollapsibleContentProp
   const [isOverflow, setIsOverflow] = useState(false);
   const contentRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = contentRef.current;
     if (el) {
       setIsOverflow(el.scrollHeight > 40);
@@ -22,8 +22,8 @@ export function CollapsibleContent({ content, markdown }: CollapsibleContentProp
     <div className="relative">
       <div
         ref={contentRef}
-        className={`text-ink text-sm leading-relaxed ${
-          !expanded && isOverflow ? "max-h-10 overflow-hidden" : ""
+        className={`text-ink text-sm leading-relaxed overflow-hidden ${
+          !expanded ? "max-h-10" : ""
         }`}
       >
         {markdown ? (
