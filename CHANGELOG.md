@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.14
+
+### Patch Changes
+
+- 改进全文搜索：使用 jieba 搜索模式提升中文分词召回率，修复重叠 token 偏移计算，自动构建搜索索引
+
 ## 0.24.13
 
 ### Patch Changes
