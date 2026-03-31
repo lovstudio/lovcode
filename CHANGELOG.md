@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.15
+
+### Patch Changes
+
+- feat(chat): 会话中显示结构化内容块（工具调用、思考过程、工具结果）
+
 ## 0.24.14
 
 ### Patch Changes
