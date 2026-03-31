@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.13
+
+### Patch Changes
+
+- feat(ProjectList): 添加会话搜索功能
+
 ## 0.24.12
 
 ### Patch Changes
