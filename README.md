@@ -36,7 +36,10 @@
 
 ## Features
 
-- **Chat History Viewer** — Browse and search conversation history across all projects with full-text search
+- **Chat History Viewer** — Browse and search conversation history across all projects with full-text search (Chinese + English)
+- **Claude.ai Import** — Import and view exported data from claude.ai web app (.zip or directory)
+- **Data Source Switching** — Filter between Claude Code local sessions and claude.ai web conversations
+- **Structured Content Blocks** — View tool calls, thinking process, and tool results in conversations
 - **Commands Manager** — View and manage slash commands (`~/.claude/commands/`)
 - **MCP Servers** — Configure and monitor MCP server integrations
 - **Skills** — Manage reusable skill templates
@@ -45,7 +48,6 @@
 - **Output Styles** — Customize response formatting
 - **Marketplace** — Browse and install community templates
 - **Customizable Statusbar** — Personalize your statusbar display with scripts
-- **Session Prompt Preview** — Hover to preview prompts in session list
 
 ## oh-my-lovcode
 
@@ -83,9 +85,11 @@ pnpm tauri build
 ## Usage
 
 1. Launch Lovcode
-2. Select **Projects** to browse chat history from Claude Code sessions
-3. Use the **Configuration** section to manage commands, MCP servers, skills, and hooks
-4. Visit **Marketplace** to discover community templates
+2. Select **Chat** to browse conversation history from Claude Code sessions
+3. Click the **Upload** button to import claude.ai exported data (.zip or folder)
+4. Switch between **All / Code / Web** tabs to filter by data source
+5. Use the **Configuration** section to manage commands, MCP servers, skills, and hooks
+6. Visit **Marketplace** to discover community templates
 
 ## Tech Stack
 
@@ -95,7 +99,7 @@ pnpm tauri build
 | Backend | Rust, Tauri 2 |
 | UI Components | shadcn/ui |
 | State | Jotai |
-| Search | Tantivy (full-text search) |
+| Search | Tantivy + jieba (full-text, Chinese-aware) |
 
 ## Star History
 
