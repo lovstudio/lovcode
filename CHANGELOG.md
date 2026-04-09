@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.24.16
+
+### Patch Changes
+
+- feat(chat): 支持导入 claude.ai 网页端导出的数据包（.zip 或目录）
+- feat(chat): 添加数据源切换标签（All/Code/Web）
+- fix(chat): 项目列表默认折叠
+- fix(nav): 修复启动时导航栏激活状态未与首页同步的问题
+- fix: 改进项目路径解码，处理末尾 /. 等边缘情况
+
 ## 0.24.15
 
 ### Patch Changes
