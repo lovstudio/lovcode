@@ -37,6 +37,8 @@ uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
 arboard = "3"
 shell-escape = "0.1.5"
+zip = "2"
+filetime = "0.2"
 libc = "0.2.179"
 tauri-plugin-updater = { version = "2", features = ["rustls-tls"] }
 tauri-plugin-process = "2"

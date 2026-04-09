@@ -1,7 +1,8 @@
 import { useState, useMemo, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronDownIcon, ChevronRightIcon, DotsHorizontalIcon, ListBulletIcon, GroupIcon, MixIcon, MagnifyingGlassIcon } from "@radix-ui/react-icons";
-import { Copy } from "lucide-react";
+import { open } from "@tauri-apps/plugin-dialog";
+import { ChevronDownIcon, ChevronRightIcon, DotsHorizontalIcon, ListBulletIcon, GroupIcon, MixIcon, MagnifyingGlassIcon, Cross2Icon } from "@radix-ui/react-icons";
+import { Copy, Upload } from "lucide-react";
 import { useAtom } from "jotai";
 import {
   allProjectsSortByAtom,
@@ -11,13 +12,15 @@ import {
 } from "../../store";
 import { useAppConfig } from "../../context";
 import { useReadableText } from "./utils";
-import { useInvokeQuery } from "../../hooks";
+import { useInvokeQuery, useQueryClient } from "../../hooks";
 import { CollapsibleContent } from "./CollapsibleContent";
 import { ContentBlockRenderer } from "./ContentBlockRenderer";
 import { ProjectLogo } from "../Workspace/ProjectLogo";
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
@@ -37,19 +40,30 @@ interface ProjectListProps {
 
 export function ProjectList({ onSelectProject, onSelectSession }: ProjectListProps) {
   const toReadable = useReadableText();
+  const queryClient = useQueryClient();
 
   const { data: projects = [], isLoading: loadingProjects } = useInvokeQuery<Project[]>(["projects"], "list_projects");
   const { data: allSessions = [], isLoading: loadingSessions } = useInvokeQuery<Session[]>(["sessions"], "list_all_sessions");
 
+  const [importing, setImporting] = useState(false);
+  const [dataSource, setDataSource] = useState<"all" | "local" | "web">("all");
+
   const [sortBy, setSortBy] = useAtom(allProjectsSortByAtom);
   const [hideEmptySessions, setHideEmptySessions] = useAtom(hideEmptySessionsAllAtom);
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string> | null>(null);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [grouped, setGrouped] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<Session[] | null>(null);
   const [searching, setSearching] = useState(false);
   const [indexReady, setIndexReady] = useState(false);
+
+  // Default all projects to collapsed on first load
+  useEffect(() => {
+    if (collapsedGroups === null && projects.length > 0) {
+      setCollapsedGroups(new Set(projects.map((p) => p.id)));
+    }
+  }, [projects, collapsedGroups]);
 
   // Build search index on mount
   useEffect(() => {
@@ -98,8 +112,15 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
 
   const loading = loadingProjects || loadingSessions;
 
+  const hasWebData = useMemo(() => projects.some((p) => p.id === "-claude-ai"), [projects]);
+
   const sortedProjects = useMemo(() => {
-    const filtered = projects.filter((p) => p.session_count > 0);
+    const filtered = projects.filter((p) => {
+      if (p.session_count === 0) return false;
+      if (dataSource === "local") return p.id !== "-claude-ai";
+      if (dataSource === "web") return p.id === "-claude-ai";
+      return true;
+    });
     return [...filtered].sort((a, b) => {
       switch (sortBy) {
         case "recent": return b.last_active - a.last_active;
@@ -107,7 +128,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
         case "name": return a.path.localeCompare(b.path);
       }
     });
-  }, [projects, sortBy]);
+  }, [projects, sortBy, dataSource]);
 
   const sessionsByProject = useMemo(() => {
     const map = new Map<string, Session[]>();
@@ -136,7 +157,12 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
   const flatSessions = useMemo(() => {
     if (grouped) return [];
     return allSessions
-      .filter((s) => s.message_count > 0 || !hideEmptySessions)
+      .filter((s) => {
+        if (s.message_count === 0 && hideEmptySessions) return false;
+        if (dataSource === "local") return s.project_id !== "-claude-ai";
+        if (dataSource === "web") return s.project_id === "-claude-ai";
+        return true;
+      })
       .sort((a, b) => {
         switch (sortBy) {
           case "recent": return b.last_modified - a.last_modified;
@@ -144,11 +170,43 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
           case "name": return (a.summary || "").localeCompare(b.summary || "");
         }
       });
-  }, [allSessions, sortBy, hideEmptySessions, grouped]);
+  }, [allSessions, sortBy, hideEmptySessions, grouped, dataSource]);
+
+  const doImport = async (path: string) => {
+    setImporting(true);
+    try {
+      const result = await invoke<{ conversation_count: number }>("import_claude_web_data", { path });
+      queryClient.invalidateQueries({ queryKey: ["projects"] });
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      alert(`Imported ${result.conversation_count} conversations from claude.ai`);
+    } catch (e) {
+      alert(`Import failed: ${e}`);
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const handleImportZip = async () => {
+    const selected = await open({
+      multiple: false,
+      title: "Select claude.ai data export (.zip)",
+      filters: [{ name: "ZIP Archive", extensions: ["zip"] }],
+    });
+    if (selected) doImport(selected);
+  };
+
+  const handleImportDir = async () => {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: "Select claude.ai data export folder",
+    });
+    if (selected) doImport(selected);
+  };
 
   const toggleCollapse = (id: string) => {
     setCollapsedGroups((prev) => {
-      const next = new Set(prev);
+      const next = new Set(prev ?? []);
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
@@ -170,8 +228,27 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
         <div className="px-4 py-4">
           <h2 className="font-serif text-lg font-semibold text-ink mb-1">Chat History</h2>
           <p className="text-xs text-muted-foreground mb-3">
-            {projects.length} projects · {allSessions.length} sessions
+            {sortedProjects.length} projects · {allSessions.length} sessions
           </p>
+
+          {/* Data source tabs */}
+          {hasWebData && (
+            <div className="flex gap-0.5 mb-2 p-0.5 rounded-lg bg-card-alt">
+              {(["all", "local", "web"] as const).map((src) => (
+                <button
+                  key={src}
+                  onClick={() => setDataSource(src)}
+                  className={`flex-1 px-2 py-1 rounded-md text-xs transition-colors ${
+                    dataSource === src
+                      ? "bg-card text-ink shadow-sm"
+                      : "text-muted-foreground hover:text-ink"
+                  }`}
+                >
+                  {src === "all" ? "All" : src === "local" ? "Code" : "Web"}
+                </button>
+              ))}
+            </div>
+          )}
 
           {/* Search */}
           <div className="relative mb-2">
@@ -232,6 +309,23 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
                 )}
               </svg>
             </button>
+
+            {/* Import claude.ai data */}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  disabled={importing}
+                  className="p-1.5 rounded-md transition-colors text-muted-foreground hover:text-ink hover:bg-card-alt disabled:opacity-50"
+                  title="Import claude.ai data export"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="min-w-[160px]">
+                <DropdownMenuItem onClick={handleImportZip}>Import .zip</DropdownMenuItem>
+                <DropdownMenuItem onClick={handleImportDir}>Import folder</DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </div>
 
@@ -247,7 +341,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
                   key={session.id}
                   session={session}
                   isSelected={selectedSession?.id === session.id}
-                  onClick={() => setSelectedSession(session)}
+                  onClick={() => setSelectedSession(prev => prev?.id === session.id ? null : session)}
                   onDoubleClick={() => onSelectSession(session)}
                   toReadable={toReadable}
                   showProject
@@ -258,8 +352,9 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
             // Grouped by project
             sortedProjects.map((project) => {
               const sessions = sessionsByProject.get(project.id) || [];
-              const isCollapsed = collapsedGroups.has(project.id);
-              const projectName = project.path.split("/").pop() || project.path;
+              const isCollapsed = collapsedGroups?.has(project.id) ?? true;
+              const cleanPath = project.path.replace(/\/+$/, "");
+              const projectName = cleanPath.split("/").filter(Boolean).pop() || cleanPath;
 
               return (
                 <div key={project.id}>
@@ -291,7 +386,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
                             key={session.id}
                             session={session}
                             isSelected={selectedSession?.id === session.id}
-                            onClick={() => setSelectedSession(session)}
+                            onClick={() => setSelectedSession(prev => prev?.id === session.id ? null : session)}
                             onDoubleClick={() => onSelectSession(session)}
                             toReadable={toReadable}
                           />
@@ -309,7 +404,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
                 key={session.id}
                 session={session}
                 isSelected={selectedSession?.id === session.id}
-                onClick={() => setSelectedSession(session)}
+                onClick={() => setSelectedSession(prev => prev?.id === session.id ? null : session)}
                 onDoubleClick={() => onSelectSession(session)}
                 toReadable={toReadable}
                 showProject
@@ -324,11 +419,19 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
         {selectedSession ? (
           <SessionDetail
             session={selectedSession}
-            onOpen={() => onSelectSession(selectedSession)}
+            onClose={() => setSelectedSession(null)}
           />
         ) : (
-          <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
-            Select a session to preview
+          <div className="flex flex-col items-center justify-center h-full gap-3 text-muted-foreground text-sm">
+            <span>Select a session to preview</span>
+            <button
+              onClick={handleImportZip}
+              disabled={importing}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs border border-border hover:bg-card-alt transition-colors disabled:opacity-50"
+            >
+              <Upload className="w-3.5 h-3.5" />
+              {importing ? "Importing..." : "Import claude.ai data (.zip)"}
+            </button>
           </div>
         )}
       </div>
@@ -386,7 +489,7 @@ function SessionItemButton({
 // Session Detail (right panel)
 // ============================================================================
 
-function SessionDetail({ session, onOpen }: { session: Session; onOpen: () => void }) {
+function SessionDetail({ session, onClose }: { session: Session; onClose: () => void }) {
   const { formatPath } = useAppConfig();
   const toReadable = useReadableText();
   const [messages, setMessages] = useState<Message[]>([]);
@@ -429,28 +532,25 @@ function SessionDetail({ session, onOpen }: { session: Session; onOpen: () => vo
             {session.message_count} messages
           </p>
         </div>
-        <div className="flex gap-2 shrink-0">
-          <button
-            onClick={onOpen}
-            className="px-3 py-1.5 rounded-lg text-xs bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
-          >
-            Open
-          </button>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button className="p-1.5 rounded-lg text-muted-foreground hover:bg-card-alt">
-                <DotsHorizontalIcon width={16} />
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-48">
-              <SessionDropdownMenuItems
-                projectId={session.project_id}
-                sessionId={session.id}
-                onExport={() => setExportDialogOpen(true)}
-              />
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button className="p-1.5 rounded-lg text-muted-foreground hover:bg-card-alt shrink-0">
+              <DotsHorizontalIcon width={16} />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-48">
+            <SessionDropdownMenuItems
+              projectId={session.project_id}
+              sessionId={session.id}
+              onExport={() => setExportDialogOpen(true)}
+            />
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={onClose} className="gap-2">
+              <Cross2Icon width={14} />
+              Close
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </header>
 
       {loading ? (

@@ -53,9 +53,11 @@ export function GlobalHeader({
     onFeatureClick(feature);
   };
 
-  // Sync primaryFeature when navigating to main features via other means (sidebar, back/forward)
+  // Sync primaryFeature when navigating via other means (sidebar, back/forward)
   useEffect(() => {
-    if (isMainNavFeature(currentFeature)) {
+    if (currentFeature === null) {
+      setPrimaryFeature(null);
+    } else if (isMainNavFeature(currentFeature)) {
       setPrimaryFeature(currentFeature);
     }
   }, [currentFeature]);

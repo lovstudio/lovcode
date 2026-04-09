@@ -358,12 +358,31 @@ fn encode_project_path(path: &str) -> String {
 /// Claude Code encodes: `/` -> `-`, and `.` -> `-`
 /// So `/.` becomes `--`, but `-` in directory names is NOT escaped
 fn decode_project_path(id: &str) -> String {
+    // Check for custom display name (used by imported data sources)
+    let display_name_file = get_claude_dir().join("projects").join(id).join(".display_name");
+    if let Ok(name) = fs::read_to_string(&display_name_file) {
+        let name = name.trim();
+        if !name.is_empty() {
+            return name.to_string();
+        }
+    }
+
     // First, handle `--` which means `/.` (hidden directories like .claude)
     // Replace `--` with a placeholder, then `-` with `/`, then restore `/.`
     let base = id
         .replace("--", "\x00")
         .replace("-", "/")
         .replace("\x00", "/.");
+
+    // Normalize: strip trailing /. and / segments (e.g. /Users/mark/././ → /Users/mark)
+    let base = base.trim_end_matches('/').to_string();
+    let base = {
+        let mut b = base.as_str();
+        while b.ends_with("/.") {
+            b = b.trim_end_matches("/.").trim_end_matches('/');
+        }
+        b.to_string()
+    };
 
     // If the base path exists, we're done
     if PathBuf::from(&base).exists() {
@@ -379,6 +398,17 @@ fn decode_project_path(id: &str) -> String {
 
             // Try merging segments: /a/b/c -> a-b-c, a-b/c, a/b-c, etc.
             if let Some(merged) = try_merge_segments(prefix, rest) {
+                return merged;
+            }
+        }
+    }
+
+    // Try merging from /Users/mark/ (home dir) as base
+    if let Some(home) = dirs::home_dir() {
+        let home_str = format!("{}/", home.display());
+        if base.starts_with(&home_str) {
+            let rest = &base[home_str.len()..];
+            if let Some(merged) = try_merge_segments(&home_str, rest) {
                 return merged;
             }
         }
@@ -7447,6 +7477,273 @@ fn activate_and_focus_window(window: &tauri::WebviewWindow) {
     }
 }
 
+// ============================================================================
+// Claude.ai Web Data Import
+// ============================================================================
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ImportResult {
+    conversation_count: usize,
+    project_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeWebConversation {
+    uuid: String,
+    name: String,
+    #[allow(dead_code)]
+    summary: Option<String>,
+    created_at: String,
+    updated_at: String,
+    chat_messages: Vec<ClaudeWebMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeWebMessage {
+    uuid: String,
+    #[allow(dead_code)]
+    text: Option<String>,
+    content: Option<Vec<serde_json::Value>>,
+    sender: String,
+    created_at: String,
+    #[allow(dead_code)]
+    updated_at: Option<String>,
+    #[allow(dead_code)]
+    attachments: Option<Vec<serde_json::Value>>,
+    #[allow(dead_code)]
+    files: Option<Vec<serde_json::Value>>,
+}
+
+/// Convert a claude.ai web message content block to Claude Code compatible format.
+/// The web format has extra fields (start_timestamp, stop_timestamp, flags, citations)
+/// that we strip, keeping only what Claude Code's parser expects.
+fn convert_web_content_block(block: &serde_json::Value) -> Option<serde_json::Value> {
+    let obj = block.as_object()?;
+    let block_type = obj.get("type").and_then(|v| v.as_str())?;
+
+    match block_type {
+        "text" => {
+            let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            if text.is_empty() {
+                return None;
+            }
+            Some(serde_json::json!({
+                "type": "text",
+                "text": text
+            }))
+        }
+        "thinking" => {
+            let thinking = obj.get("thinking").and_then(|v| v.as_str()).unwrap_or("");
+            if thinking.is_empty() {
+                return None;
+            }
+            Some(serde_json::json!({
+                "type": "thinking",
+                "thinking": thinking
+            }))
+        }
+        "tool_use" => {
+            let id = obj.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let input = obj.get("input").cloned().unwrap_or(serde_json::Value::Null);
+            Some(serde_json::json!({
+                "type": "tool_use",
+                "id": id,
+                "name": name,
+                "input": input
+            }))
+        }
+        "tool_result" => {
+            let tool_use_id = obj.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("");
+            // tool_result content can be array of {type, text} or string
+            let content = obj.get("content").cloned().unwrap_or(serde_json::Value::Null);
+            // Flatten to string if it's an array of text blocks
+            let content_str = match &content {
+                serde_json::Value::Array(arr) => {
+                    arr.iter()
+                        .filter_map(|item| {
+                            item.as_object()
+                                .and_then(|o| o.get("text"))
+                                .and_then(|v| v.as_str())
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
+                serde_json::Value::String(s) => s.clone(),
+                _ => String::new(),
+            };
+            Some(serde_json::json!({
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": content_str
+            }))
+        }
+        // Skip token_budget and other unknown types
+        _ => None,
+    }
+}
+
+/// Convert a single claude.ai conversation to Claude Code JSONL format
+fn convert_conversation_to_jsonl(conv: &ClaudeWebConversation) -> String {
+    let mut lines = Vec::new();
+
+    // Summary line
+    let summary_line = serde_json::json!({
+        "type": "summary",
+        "summary": conv.name
+    });
+    lines.push(serde_json::to_string(&summary_line).unwrap_or_default());
+
+    // Message lines
+    for msg in &conv.chat_messages {
+        let role = match msg.sender.as_str() {
+            "human" => "user",
+            "assistant" => "assistant",
+            _ => continue,
+        };
+
+        // Convert content blocks
+        let content_blocks: Vec<serde_json::Value> = msg
+            .content
+            .as_ref()
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter_map(|b| convert_web_content_block(b))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Skip messages with no content
+        if content_blocks.is_empty() {
+            continue;
+        }
+
+        let line = serde_json::json!({
+            "type": role,
+            "uuid": msg.uuid,
+            "timestamp": msg.created_at,
+            "message": {
+                "role": role,
+                "content": content_blocks
+            }
+        });
+        lines.push(serde_json::to_string(&line).unwrap_or_default());
+    }
+
+    lines.join("\n")
+}
+
+#[tauri::command]
+async fn import_claude_web_data(path: String) -> Result<ImportResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let source_path = Path::new(&path);
+
+        // Determine if it's a zip or directory
+        let conversations_json: String = if source_path.is_dir() {
+            // Direct directory - read conversations.json
+            let conv_path = source_path.join("conversations.json");
+            if !conv_path.exists() {
+                return Err("conversations.json not found in directory".to_string());
+            }
+            fs::read_to_string(&conv_path).map_err(|e| format!("Failed to read conversations.json: {}", e))?
+        } else if source_path.extension().map_or(false, |e| e == "zip") {
+            // ZIP file - extract conversations.json
+            let file = fs::File::open(source_path)
+                .map_err(|e| format!("Failed to open zip: {}", e))?;
+            let mut archive = zip::ZipArchive::new(file)
+                .map_err(|e| format!("Failed to read zip: {}", e))?;
+
+            // Find conversations.json (might be in a subdirectory)
+            let mut found = None;
+            for i in 0..archive.len() {
+                let entry = archive.by_index(i).map_err(|e| e.to_string())?;
+                if entry.name().ends_with("conversations.json") {
+                    found = Some(i);
+                    break;
+                }
+            }
+
+            let idx = found.ok_or("conversations.json not found in zip")?;
+            let mut entry = archive.by_index(idx).map_err(|e| e.to_string())?;
+            let mut content = String::new();
+            std::io::Read::read_to_string(&mut entry, &mut content)
+                .map_err(|e| format!("Failed to read conversations.json from zip: {}", e))?;
+            content
+        } else {
+            return Err("Path must be a directory or .zip file".to_string());
+        };
+
+        // Parse conversations
+        let conversations: Vec<ClaudeWebConversation> =
+            serde_json::from_str(&conversations_json)
+                .map_err(|e| format!("Failed to parse conversations.json: {}", e))?;
+
+        // Create target project directory
+        let project_id = "-claude-ai".to_string();
+        let project_dir = get_claude_dir().join("projects").join(&project_id);
+        fs::create_dir_all(&project_dir)
+            .map_err(|e| format!("Failed to create project directory: {}", e))?;
+
+        // Save display name from source path
+        let display_name = Path::new(&path)
+            .file_stem()
+            .or_else(|| Path::new(&path).file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "claude.ai".to_string());
+        let _ = fs::write(project_dir.join(".display_name"), &display_name);
+
+        let mut count = 0;
+
+        for conv in &conversations {
+            // Skip empty conversations
+            if conv.chat_messages.is_empty() {
+                continue;
+            }
+
+            let jsonl_content = convert_conversation_to_jsonl(conv);
+            if jsonl_content.is_empty() {
+                continue;
+            }
+
+            let session_file = project_dir.join(format!("{}.jsonl", conv.uuid));
+            fs::write(&session_file, &jsonl_content)
+                .map_err(|e| format!("Failed to write session {}: {}", conv.uuid, e))?;
+
+            // Set file modification time to match conversation's updated_at
+            if let Ok(updated) = chrono::DateTime::parse_from_rfc3339(&conv.updated_at) {
+                let ft = filetime::FileTime::from_unix_time(updated.timestamp(), 0);
+                let _ = filetime::set_file_mtime(&session_file, ft);
+            }
+
+            count += 1;
+        }
+
+        // Save import metadata
+        let import_meta = serde_json::json!({
+            "source": path,
+            "imported_at": chrono::Utc::now().to_rfc3339(),
+            "conversation_count": count
+        });
+        let meta_path = get_lovstudio_dir().join("claude-web-imports.json");
+        let mut imports: Vec<serde_json::Value> = if meta_path.exists() {
+            serde_json::from_str(&fs::read_to_string(&meta_path).unwrap_or_default())
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
+        imports.push(import_meta);
+        let _ = fs::write(&meta_path, serde_json::to_string_pretty(&imports).unwrap_or_default());
+
+        Ok(ImportResult {
+            conversation_count: count,
+            project_id,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -7757,7 +8054,9 @@ pub fn run() {
             diagnostics_detect_stack,
             diagnostics_check_env,
             diagnostics_add_missing_keys,
-            diagnostics_scan_file_lines
+            diagnostics_scan_file_lines,
+            // Claude.ai web import
+            import_claude_web_data
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
