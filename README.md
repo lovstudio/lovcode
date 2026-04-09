@@ -22,6 +22,7 @@
 ---
 
 <p align="center">
+  <a href="#release-highlights">Updates</a> •
   <a href="#features">Features</a> •
   <a href="#oh-my-lovcode">oh-my-lovcode</a> •
   <a href="#installation">Installation</a> •
@@ -31,6 +32,27 @@
 </p>
 
 ---
+
+## Release Highlights
+
+### v0.24.16 — Claude.ai Import
+
+Import and browse your claude.ai web conversation history alongside Claude Code sessions.
+
+<img src="docs/images/claude-ai-import.png" alt="Claude.ai Import" width="100%">
+
+| Version | Highlights |
+|---------|------------|
+| **0.24.16** | Import claude.ai web exports (.zip/dir), data source tabs (All/Code/Web) |
+| **0.24.15** | Structured content blocks — view tool calls, thinking, tool results |
+| **0.24.14** | Full-text search with jieba Chinese tokenization |
+| **0.24.12** | Two-column master-detail layout with grouped/flat toggle |
+| **0.24.11** | In-app auto-updater |
+| **0.24.7** | Session usage tracking with token counts and cost estimation |
+| **0.24.6** | Script-configurable statusbar, Apple-style settings layout |
+| **0.24.0** | File-system routing architecture, settings split into sub-pages |
+
+[Full Changelog](CHANGELOG.md)
 
 ![Gallery](docs/assets/gallery.png)
 
@@ -54,22 +76,22 @@
 Community configuration framework for Lovcode, inspired by oh-my-zsh.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MarkShawn2020/oh-my-lovcode/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/lovstudio/oh-my-lovcode/main/install.sh | bash
 ```
 
-Share and discover statusbar themes, keybindings, and more at [oh-my-lovcode](https://github.com/MarkShawn2020/oh-my-lovcode).
+Share and discover statusbar themes, keybindings, and more at [oh-my-lovcode](https://github.com/lovstudio/oh-my-lovcode).
 
 ## Installation
 
 ### From Release
 
-Download the latest release for your platform from [Releases](https://github.com/markshawn2020/lovcode/releases).
+Download the latest release for your platform from [Releases](https://github.com/lovstudio/lovcode/releases).
 
 ### From Source
 
 ```bash
 # Clone the repository (with submodules)
-git clone --recursive https://github.com/markshawn2020/lovcode.git
+git clone --recursive https://github.com/lovstudio/lovcode.git
 cd lovcode
 
 # Install dependencies
@@ -101,30 +123,9 @@ pnpm tauri build
 | State | Jotai |
 | Search | Tantivy + jieba (full-text, Chinese-aware) |
 
-## Release Highlights
-
-### v0.24.16 — Claude.ai Import
-
-Import and browse your claude.ai web conversation history alongside Claude Code sessions.
-
-<img src="docs/images/claude-ai-import.png" alt="Claude.ai Import" width="100%">
-
-| Version | Highlights |
-|---------|------------|
-| **0.24.16** | Import claude.ai web exports (.zip/dir), data source tabs (All/Code/Web) |
-| **0.24.15** | Structured content blocks — view tool calls, thinking, tool results |
-| **0.24.14** | Full-text search with jieba Chinese tokenization |
-| **0.24.12** | Two-column master-detail layout with grouped/flat toggle |
-| **0.24.11** | In-app auto-updater |
-| **0.24.7** | Session usage tracking with token counts and cost estimation |
-| **0.24.6** | Script-configurable statusbar, Apple-style settings layout |
-| **0.24.0** | File-system routing architecture, settings split into sub-pages |
-
-[Full Changelog](CHANGELOG.md)
-
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=markshawn2020/lovcode&type=Date)](https://star-history.com/#markshawn2020/lovcode&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=lovstudio/lovcode&type=Date)](https://star-history.com/#lovstudio/lovcode&Date)
 
 ## License
 
