@@ -101,6 +101,21 @@ pnpm tauri build
 | State | Jotai |
 | Search | Tantivy + jieba (full-text, Chinese-aware) |
 
+## Release Highlights
+
+| Version | Highlights |
+|---------|------------|
+| **0.24.16** | Import claude.ai web exports (.zip/dir), data source tabs (All/Code/Web) |
+| **0.24.15** | Structured content blocks — view tool calls, thinking, tool results |
+| **0.24.14** | Full-text search with jieba Chinese tokenization |
+| **0.24.12** | Two-column master-detail layout with grouped/flat toggle |
+| **0.24.11** | In-app auto-updater |
+| **0.24.7** | Session usage tracking with token counts and cost estimation |
+| **0.24.6** | Script-configurable statusbar, Apple-style settings layout |
+| **0.24.0** | File-system routing architecture, settings split into sub-pages |
+
+[Full Changelog](CHANGELOG.md)
+
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=markshawn2020/lovcode&type=Date)](https://star-history.com/#markshawn2020/lovcode&Date)
