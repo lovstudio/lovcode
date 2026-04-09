@@ -103,6 +103,12 @@ pnpm tauri build
 
 ## Release Highlights
 
+### v0.24.16 — Claude.ai Import
+
+Import and browse your claude.ai web conversation history alongside Claude Code sessions.
+
+<img src="docs/images/claude-ai-import.png" alt="Claude.ai Import" width="100%">
+
 | Version | Highlights |
 |---------|------------|
 | **0.24.16** | Import claude.ai web exports (.zip/dir), data source tabs (All/Code/Web) |
