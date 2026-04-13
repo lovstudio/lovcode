@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.17
+
+### Patch Changes
+
+- Add "Copy Resume Command" menu item and fix project path decoding from session cwd
+
 ## 0.24.16
 
 ### Patch Changes
