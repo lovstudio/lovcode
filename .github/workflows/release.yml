@@ -48,15 +48,16 @@ jobs:
         run: |
           VERSION=$(node -p "require('./package.json').version")
           TAG="v$VERSION"
-          if ! git ls-remote --tags origin | grep -q "refs/tags/$TAG$"; then
+          if git ls-remote --tags origin | grep -q "refs/tags/$TAG$"; then
+            echo "Tag $TAG already exists on remote"
+            echo "tag=$TAG" >> $GITHUB_OUTPUT
+          else
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git tag "$TAG"
+            git tag -f "$TAG"
             git push origin "$TAG"
             echo "tag=$TAG" >> $GITHUB_OUTPUT
             echo "Pushed tag $TAG"
-          else
-            echo "Tag $TAG already exists"
           fi
 
   build:
