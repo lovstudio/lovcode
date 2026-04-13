@@ -114,6 +114,7 @@ export function MessageView({ projectId, projectPath, sessionId, summary: initia
               <SessionContextMenuItems
                 projectId={projectId}
                 sessionId={sessionId}
+                projectPath={projectPath}
                 originalChat={originalChat}
                 setOriginalChat={setOriginalChat}
                 markdownPreview={markdownPreview}
@@ -132,6 +133,7 @@ export function MessageView({ projectId, projectPath, sessionId, summary: initia
               <SessionDropdownMenuItems
                 projectId={projectId}
                 sessionId={sessionId}
+                projectPath={projectPath}
                 originalChat={originalChat}
                 setOriginalChat={setOriginalChat}
                 markdownPreview={markdownPreview}

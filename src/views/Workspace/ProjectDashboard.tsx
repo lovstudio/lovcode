@@ -322,6 +322,7 @@ export function ProjectDashboard({ project }: ProjectDashboardProps) {
                           <SessionDropdownMenuItems
                             projectId={session.project_id}
                             sessionId={session.id}
+                            projectPath={session.project_path}
                             onResume={() => handleResumeSession(session)}
                           />
                         </DropdownMenuContent>

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { FolderOpen, Copy, Download } from "lucide-react";
+import { FolderOpen, Copy, Download, Terminal } from "lucide-react";
 import { ExternalLinkIcon, ChatBubbleIcon } from "@radix-ui/react-icons";
 import {
   DropdownMenuItem,
@@ -15,6 +15,7 @@ import {
 export interface SessionMenuConfig {
   projectId: string;
   sessionId: string;
+  projectPath?: string;
   originalChat?: boolean;
   setOriginalChat?: (v: boolean) => void;
   markdownPreview?: boolean;
@@ -34,14 +35,19 @@ export function useSessionMenuHandlers(projectId: string, sessionId: string) {
     await invoke("copy_to_clipboard", { text: path });
   };
   const handleCopySessionId = () => invoke("copy_to_clipboard", { text: sessionId });
+  const handleCopyResumeCommand = (projectPath: string) => {
+    const cmd = `cd ${projectPath} && claude --resume ${sessionId}`;
+    return invoke("copy_to_clipboard", { text: cmd });
+  };
 
-  return { handleReveal, handleOpenInEditor, handleCopyPath, handleCopySessionId };
+  return { handleReveal, handleOpenInEditor, handleCopyPath, handleCopySessionId, handleCopyResumeCommand };
 }
 
 // DropdownMenu items
 export function SessionDropdownMenuItems({
   projectId,
   sessionId,
+  projectPath,
   originalChat,
   setOriginalChat,
   markdownPreview,
@@ -49,24 +55,28 @@ export function SessionDropdownMenuItems({
   onExport,
   onResume,
 }: SessionMenuConfig) {
-  const { handleReveal, handleOpenInEditor, handleCopyPath, handleCopySessionId } =
+  const { handleReveal, handleOpenInEditor, handleCopyPath, handleCopySessionId, handleCopyResumeCommand } =
     useSessionMenuHandlers(projectId, sessionId);
 
   return (
     <>
-      {onResume && (
-        <>
-          <DropdownMenuItem onClick={handleCopySessionId} className="gap-2">
-            <Copy size={14} />
-            Copy Session ID
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={onResume} className="gap-2">
-            <ChatBubbleIcon className="w-3.5 h-3.5" />
-            Resume Session
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-        </>
+      <DropdownMenuItem onClick={handleCopySessionId} className="gap-2">
+        <Copy size={14} />
+        Copy Session ID
+      </DropdownMenuItem>
+      {projectPath && (
+        <DropdownMenuItem onClick={() => handleCopyResumeCommand(projectPath)} className="gap-2">
+          <Terminal size={14} />
+          Copy Resume Command
+        </DropdownMenuItem>
       )}
+      {onResume && (
+        <DropdownMenuItem onClick={onResume} className="gap-2">
+          <ChatBubbleIcon className="w-3.5 h-3.5" />
+          Resume Session
+        </DropdownMenuItem>
+      )}
+      <DropdownMenuSeparator />
       <DropdownMenuItem onClick={handleReveal} className="gap-2">
         <FolderOpen size={14} />
         Reveal in Finder
@@ -111,6 +121,7 @@ export function SessionDropdownMenuItems({
 export function SessionContextMenuItems({
   projectId,
   sessionId,
+  projectPath,
   originalChat,
   setOriginalChat,
   markdownPreview,
@@ -118,24 +129,28 @@ export function SessionContextMenuItems({
   onExport,
   onResume,
 }: SessionMenuConfig) {
-  const { handleReveal, handleOpenInEditor, handleCopyPath, handleCopySessionId } =
+  const { handleReveal, handleOpenInEditor, handleCopyPath, handleCopySessionId, handleCopyResumeCommand } =
     useSessionMenuHandlers(projectId, sessionId);
 
   return (
     <>
-      {onResume && (
-        <>
-          <ContextMenuItem onClick={handleCopySessionId} className="gap-2">
-            <Copy size={14} />
-            Copy Session ID
-          </ContextMenuItem>
-          <ContextMenuItem onClick={onResume} className="gap-2">
-            <ChatBubbleIcon className="w-3.5 h-3.5" />
-            Resume Session
-          </ContextMenuItem>
-          <ContextMenuSeparator />
-        </>
+      <ContextMenuItem onClick={handleCopySessionId} className="gap-2">
+        <Copy size={14} />
+        Copy Session ID
+      </ContextMenuItem>
+      {projectPath && (
+        <ContextMenuItem onClick={() => handleCopyResumeCommand(projectPath)} className="gap-2">
+          <Terminal size={14} />
+          Copy Resume Command
+        </ContextMenuItem>
       )}
+      {onResume && (
+        <ContextMenuItem onClick={onResume} className="gap-2">
+          <ChatBubbleIcon className="w-3.5 h-3.5" />
+          Resume Session
+        </ContextMenuItem>
+      )}
+      <ContextMenuSeparator />
       <ContextMenuItem onClick={handleReveal} className="gap-2">
         <FolderOpen size={14} />
         Reveal in Finder

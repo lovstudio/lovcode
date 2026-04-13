@@ -236,6 +236,7 @@ struct RawLine {
     summary: Option<String>,
     slug: Option<String>,
     uuid: Option<String>,
+    cwd: Option<String>,
     message: Option<RawMessage>,
     timestamp: Option<String>,
     #[serde(rename = "isMeta")]
@@ -649,6 +650,7 @@ async fn get_sessions_usage(project_id: String) -> Result<Vec<SessionUsageEntry>
 struct SessionHead {
     title: Option<String>,
     summary: Option<String>,
+    cwd: Option<String>,
     message_count: usize,
 }
 
@@ -672,12 +674,13 @@ fn read_session_head(path: &Path, max_lines: usize) -> SessionHead {
 
     let file = match fs::File::open(path) {
         Ok(f) => f,
-        Err(_) => return SessionHead { title: None, summary: None, message_count: 0 },
+        Err(_) => return SessionHead { title: None, summary: None, cwd: None, message_count: 0 },
     };
 
     let reader = BufReader::new(file);
     let mut summary = None;
     let mut slug: Option<String> = None;
+    let mut cwd: Option<String> = None;
     let mut first_user_message: Option<String> = None;
     let mut message_count = 0;
 
@@ -700,6 +703,14 @@ fn read_session_head(path: &Path, max_lines: usize) -> SessionHead {
             }
             if parsed.line_type.as_deref() == Some("user") {
                 message_count += 1;
+                // Capture cwd from first user message
+                if cwd.is_none() {
+                    if let Some(c) = &parsed.cwd {
+                        if !c.is_empty() {
+                            cwd = Some(c.clone());
+                        }
+                    }
+                }
                 // Capture first user message as fallback summary
                 if first_user_message.is_none() {
                     if let Some(msg) = &parsed.message {
@@ -740,7 +751,7 @@ fn read_session_head(path: &Path, max_lines: usize) -> SessionHead {
 
     let title = slug.map(|s| slug_to_title(&s));
     let final_summary = summary.or(first_user_message).map(|s| restore_slash_command(&s));
-    SessionHead { title, summary: final_summary, message_count }
+    SessionHead { title, summary: final_summary, cwd, message_count }
 }
 
 /// Convert <command-message>...</command-message><command-name>/cmd</command-name> to /cmd format
@@ -867,7 +878,7 @@ async fn list_all_sessions() -> Result<Vec<Session>, String> {
                 .map(|d| d.as_secs())
                 .unwrap_or(last_modified);
 
-            let display_path = decode_project_path(project_id);
+            let display_path = head.cwd.clone().unwrap_or_else(|| decode_project_path(project_id));
 
             all_sessions.push(Session {
                 id: session_id.clone(),
@@ -909,6 +920,7 @@ async fn list_all_sessions() -> Result<Vec<Session>, String> {
                     }
 
                     let head = read_session_head(&path, 20);
+                    let session_path = head.cwd.clone().unwrap_or_else(|| display_path.clone());
 
                     let metadata = fs::metadata(&path).ok();
                     let last_modified = metadata.as_ref()
@@ -925,7 +937,7 @@ async fn list_all_sessions() -> Result<Vec<Session>, String> {
                     all_sessions.push(Session {
                         id: session_id,
                         project_id: project_id.clone(),
-                        project_path: Some(display_path.clone()),
+                        project_path: Some(session_path),
                         title: head.title,
                         summary: head.summary,
                         message_count: head.message_count,
@@ -1014,6 +1026,7 @@ async fn list_all_chats(
             let content = fs::read_to_string(&path).unwrap_or_default();
 
             let mut session_summary: Option<String> = None;
+            let mut session_cwd: Option<String> = None;
             let mut session_messages: Vec<ChatMessage> = Vec::new();
 
             for line in content.lines() {
@@ -1022,6 +1035,15 @@ async fn list_all_chats(
 
                     if line_type == Some("summary") {
                         session_summary = parsed.summary;
+                    }
+
+                    // Capture cwd from first user message
+                    if session_cwd.is_none() {
+                        if let Some(c) = &parsed.cwd {
+                            if !c.is_empty() {
+                                session_cwd = Some(c.clone());
+                            }
+                        }
                     }
 
                     if line_type == Some("user") || line_type == Some("assistant") {
@@ -1048,9 +1070,11 @@ async fn list_all_chats(
                 }
             }
 
-            // Update session_summary for all messages
+            // Update session_summary and project_path for all messages
+            let resolved_path = session_cwd.unwrap_or(project_path);
             for msg in &mut session_messages {
                 msg.session_summary = session_summary.clone();
+                msg.project_path = resolved_path.clone();
             }
 
             all_chats.extend(session_messages);
