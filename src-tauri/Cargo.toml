@@ -1,6 +1,6 @@
 [package]
 name = "lovcode"
-version = "0.24.17"
+version = "0.24.18"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"

@@ -4,10 +4,11 @@ import Markdown from "react-markdown";
 interface CollapsibleContentProps {
   content: string;
   markdown: boolean;
+  defaultCollapsed?: boolean;
 }
 
-export function CollapsibleContent({ content, markdown }: CollapsibleContentProps) {
-  const [expanded, setExpanded] = useState(false);
+export function CollapsibleContent({ content, markdown, defaultCollapsed = false }: CollapsibleContentProps) {
+  const [expanded, setExpanded] = useState(!defaultCollapsed);
   const [isOverflow, setIsOverflow] = useState(false);
   const contentRef = useRef<HTMLDivElement>(null);
 

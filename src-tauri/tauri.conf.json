@@ -55,7 +55,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/MarkShawn2020/lovcode/releases/latest/download/latest.json"
+        "https://github.com/lovstudio/lovcode/releases/latest/download/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE3RTU3RjBEQ0MyMDJGNzMKUldSekx5RE1EWC9sRjJPRFBGZmVoS05ZYmpoTHBwSnQraVhHZ3FDQW5ZRGdPc09MMmFwWDczUWMK"
     }

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.24.18
+
+### Patch Changes
+
+- fix(chat): show full message content by default instead of collapsed 40px
+- fix(updater): correct endpoint URL from MarkShawn2020 to lovstudio org
+
 ## 0.24.17
 
 ### Patch Changes
