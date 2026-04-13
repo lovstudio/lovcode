@@ -542,7 +542,7 @@ function SessionDetail({ session, onClose }: { session: Session; onClose: () => 
             <SessionDropdownMenuItems
               projectId={session.project_id}
               sessionId={session.id}
-              projectPath={session.project_path}
+              projectPath={session.project_path ?? undefined}
               onExport={() => setExportDialogOpen(true)}
             />
             <DropdownMenuSeparator />

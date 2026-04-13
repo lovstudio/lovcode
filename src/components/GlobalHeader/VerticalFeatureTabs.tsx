@@ -611,7 +611,7 @@ function SessionItem({ session, onResume, projectLabel }: SessionItemProps) {
           <SessionDropdownMenuItems
             projectId={session.project_id}
             sessionId={session.id}
-            projectPath={session.project_path}
+            projectPath={session.project_path ?? undefined}
             onResume={onResume}
           />
         </DropdownMenuContent>
