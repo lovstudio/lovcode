@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.19
+
+### Patch Changes
+
+- Fix skill detail page "not found" error and show update status inline in status bar
+
 ## 0.24.18
 
 ### Patch Changes
