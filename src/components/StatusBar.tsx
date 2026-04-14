@@ -7,7 +7,7 @@
  * - Fallback to built-in status bar if no script configured
  */
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { useAtom } from "jotai";
+import { useAtom, useAtomValue } from "jotai";
 import { profileAtom, workspaceDataAtom } from "../store";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -21,6 +21,7 @@ import {
   SettingsIcon,
 } from "lucide-react";
 import { version as VERSION } from "../../package.json";
+import { updateStateAtom } from "./UpdateChecker";
 
 interface NetworkInfo {
   region: string;
@@ -110,6 +111,29 @@ function parseAnsi(text: string): AnsiSpan[] {
   }
 
   return spans.filter(s => s.text.length > 0);
+}
+
+function VersionWithUpdateStatus() {
+  const { stage, update, error } = useAtomValue(updateStateAtom);
+
+  switch (stage) {
+    case "checking":
+      return <span className="text-muted-foreground">v{VERSION} ...</span>;
+    case "latest":
+      return <span className="text-muted-foreground">v{VERSION} (latest)</span>;
+    case "available":
+      return (
+        <span className="text-primary cursor-pointer" title={`v${update?.version} available`}>
+          v{VERSION} → v{update?.version}
+        </span>
+      );
+    case "downloading":
+      return <span className="text-primary animate-pulse">Updating...</span>;
+    case "done":
+      return <span className="text-green-600">Updated! Restart to apply</span>;
+    case "error":
+      return <span className="text-muted-foreground" title={error}>v{VERSION} (update check failed)</span>;
+  }
 }
 
 interface StatusBarProps {
@@ -322,7 +346,7 @@ export function StatusBar({ onOpenSettings }: StatusBarProps) {
       {/* Left: Product name & version */}
       <div className="flex items-center gap-4">
         <span className="font-medium text-ink">Lovcode</span>
-        <span className="text-muted-foreground">v{VERSION}</span>
+        <VersionWithUpdateStatus />
 
         {/* Stats */}
         <div className="flex items-center gap-3 ml-2 border-l border-border/50 pl-4">

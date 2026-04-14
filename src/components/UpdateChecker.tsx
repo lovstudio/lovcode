@@ -1,31 +1,53 @@
 import { useState, useEffect } from "react";
+import { atom, useAtom } from "jotai";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { Button } from "./ui/button";
 import { Progress } from "./ui/progress";
 import { X } from "lucide-react";
 
-type Stage = "available" | "downloading" | "done" | "error";
+type UpdateStage = "checking" | "latest" | "available" | "downloading" | "done" | "error";
+
+interface UpdateState {
+  stage: UpdateStage;
+  update: Update | null;
+  error: string;
+}
+
+export const updateStateAtom = atom<UpdateState>({
+  stage: "checking",
+  update: null,
+  error: "",
+});
 
 export function UpdateChecker() {
-  const [update, setUpdate] = useState<Update | null>(null);
-  const [stage, setStage] = useState<Stage>("available");
+  const [state, setState] = useAtom(updateStateAtom);
   const [progress, setProgress] = useState(0);
-  const [error, setError] = useState("");
   const [dismissed, setDismissed] = useState(false);
 
   useEffect(() => {
     check()
       .then((u) => {
-        if (u?.available) setUpdate(u);
+        if (u?.available) {
+          setState({ stage: "available", update: u, error: "" });
+        } else {
+          setState({ stage: "latest", update: null, error: "" });
+        }
       })
-      .catch(() => {});
-  }, []);
+      .catch((e) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error("[UpdateChecker]", e);
+        setState({ stage: "error", update: null, error: msg });
+      });
+  }, [setState]);
 
-  if (!update || dismissed) return null;
+  const { stage, update, error } = state;
+
+  if (!update || dismissed || (stage !== "available" && stage !== "downloading" && stage !== "done" && stage !== "error")) return null;
 
   const handleUpdate = async () => {
-    setStage("downloading");
+    if (!update) return;
+    setState((s) => ({ ...s, stage: "downloading" }));
     setProgress(0);
     try {
       let totalBytes = 0;
@@ -42,15 +64,14 @@ export function UpdateChecker() {
           setProgress(100);
         }
       });
-      setStage("done");
+      setState((s) => ({ ...s, stage: "done" }));
     } catch (e) {
-      setStage("error");
-      setError(e instanceof Error ? e.message : String(e));
+      setState((s) => ({
+        ...s,
+        stage: "error",
+        error: e instanceof Error ? e.message : String(e),
+      }));
     }
-  };
-
-  const handleRelaunch = async () => {
-    await relaunch();
   };
 
   return (
@@ -106,4 +127,8 @@ export function UpdateChecker() {
       </div>
     </div>
   );
+}
+
+async function handleRelaunch() {
+  await relaunch();
 }
