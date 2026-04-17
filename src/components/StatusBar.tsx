@@ -21,7 +21,7 @@ import {
   SettingsIcon,
 } from "lucide-react";
 import { version as VERSION } from "../../package.json";
-import { updateStateAtom } from "./UpdateChecker";
+import { updateStateAtom, type UpdateStage } from "./UpdateChecker";
 
 interface NetworkInfo {
   region: string;
@@ -116,24 +116,29 @@ function parseAnsi(text: string): AnsiSpan[] {
 function VersionWithUpdateStatus() {
   const { stage, update, error } = useAtomValue(updateStateAtom);
 
-  switch (stage) {
-    case "checking":
-      return <span className="text-muted-foreground">v{VERSION} ...</span>;
-    case "latest":
-      return <span className="text-muted-foreground">v{VERSION} (latest)</span>;
-    case "available":
-      return (
-        <span className="text-primary cursor-pointer" title={`v${update?.version} available`}>
-          v{VERSION} → v{update?.version}
-        </span>
-      );
-    case "downloading":
-      return <span className="text-primary animate-pulse">Updating...</span>;
-    case "done":
-      return <span className="text-green-600">Updated! Restart to apply</span>;
-    case "error":
-      return <span className="text-muted-foreground" title={error}>v{VERSION} (update check failed)</span>;
+  const titles: Record<UpdateStage, string> = {
+    checking: "Checking for updates...",
+    latest: "You're on the latest version",
+    available: `v${update?.version} available — click to update`,
+    downloading: "Downloading update...",
+    done: "Update installed — restart to apply",
+    error: error || "Update check failed",
+  };
+
+  if (stage === "available") {
+    return (
+      <span className="text-primary cursor-pointer" title={titles[stage]}>
+        v{VERSION} → v{update?.version}
+      </span>
+    );
   }
+  if (stage === "downloading") {
+    return <span className="text-primary animate-pulse" title={titles[stage]}>v{VERSION} ↓</span>;
+  }
+  if (stage === "done") {
+    return <span className="text-green-600 cursor-pointer" title={titles[stage]}>v{VERSION} ✓</span>;
+  }
+  return <span className="text-muted-foreground" title={titles[stage]}>v{VERSION}</span>;
 }
 
 interface StatusBarProps {

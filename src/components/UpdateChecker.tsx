@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { atom, useAtom } from "jotai";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -6,7 +6,7 @@ import { Button } from "./ui/button";
 import { Progress } from "./ui/progress";
 import { X } from "lucide-react";
 
-type UpdateStage = "checking" | "latest" | "available" | "downloading" | "done" | "error";
+export type UpdateStage = "checking" | "latest" | "available" | "downloading" | "done" | "error";
 
 interface UpdateState {
   stage: UpdateStage;
@@ -25,9 +25,18 @@ export function UpdateChecker() {
   const [progress, setProgress] = useState(0);
   const [dismissed, setDismissed] = useState(false);
 
+  const checked = useRef(false);
   useEffect(() => {
+    if (checked.current) return;
+    checked.current = true;
+
+    const timeout = setTimeout(() => {
+      setState((s) => s.stage === "checking" ? { stage: "latest", update: null, error: "" } : s);
+    }, 10_000);
+
     check()
       .then((u) => {
+        clearTimeout(timeout);
         if (u?.available) {
           setState({ stage: "available", update: u, error: "" });
         } else {
@@ -35,6 +44,7 @@ export function UpdateChecker() {
         }
       })
       .catch((e) => {
+        clearTimeout(timeout);
         const msg = e instanceof Error ? e.message : String(e);
         console.error("[UpdateChecker]", e);
         setState({ stage: "error", update: null, error: msg });

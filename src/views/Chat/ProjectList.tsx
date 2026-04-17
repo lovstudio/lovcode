@@ -9,6 +9,7 @@ import {
   hideEmptySessionsAllAtom,
   originalChatAtom,
   markdownPreviewAtom,
+  userPromptsOnlyAtom,
 } from "../../store";
 import { useAppConfig } from "../../context";
 import { useReadableText } from "./utils";
@@ -496,6 +497,7 @@ function SessionDetail({ session, onClose }: { session: Session; onClose: () => 
   const [loading, setLoading] = useState(true);
   const [originalChat] = useAtom(originalChatAtom);
   const [markdownPreview] = useAtom(markdownPreviewAtom);
+  const [userPromptsOnly, setUserPromptsOnly] = useAtom(userPromptsOnlyAtom);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
 
   const displaySummary = session.title || toReadable(session.summary) || "Untitled";
@@ -510,49 +512,69 @@ function SessionDetail({ session, onClose }: { session: Session; onClose: () => 
       .finally(() => setLoading(false));
   }, [session.project_id, session.id]);
 
-  const filteredMessages = useMemo(
-    () => (originalChat ? messages.filter((m) => !m.is_meta && !m.is_tool) : messages),
-    [messages, originalChat]
-  );
+  const filteredMessages = useMemo(() => {
+    let result = originalChat ? messages.filter((m) => !m.is_meta && !m.is_tool) : messages;
+    if (userPromptsOnly) result = result.filter((m) => m.role === "user");
+    return result;
+  }, [messages, originalChat, userPromptsOnly]);
 
   const handleCopyContent = (content: string) => {
     invoke("copy_to_clipboard", { text: content });
   };
 
   return (
-    <div className="px-6 py-6">
-      <header className="mb-6 flex items-start justify-between gap-4">
+    <div className="pb-6">
+      <header className="sticky top-0 z-10 bg-background/95 backdrop-blur border-b border-border px-6 py-4 mb-4 flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <h2 className="font-serif text-xl font-semibold text-ink leading-tight mb-1 line-clamp-2">
+          <h2
+            className="font-serif text-xl font-semibold text-ink leading-tight mb-1 truncate"
+            title={displaySummary}
+          >
             {displaySummary}
           </h2>
           <p className="text-xs text-muted-foreground truncate">
             {session.project_path ? formatPath(session.project_path) : session.project_id}
             {" · "}
-            {session.message_count} messages
+            {userPromptsOnly
+              ? `${filteredMessages.length} prompts`
+              : `${session.message_count} messages`}
           </p>
         </div>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button className="p-1.5 rounded-lg text-muted-foreground hover:bg-card-alt shrink-0">
-              <DotsHorizontalIcon width={16} />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-48">
-            <SessionDropdownMenuItems
-              projectId={session.project_id}
-              sessionId={session.id}
-              projectPath={session.project_path ?? undefined}
-              onExport={() => setExportDialogOpen(true)}
+        <div className="flex items-center gap-3 shrink-0">
+          <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
+            <input
+              type="checkbox"
+              checked={userPromptsOnly}
+              onChange={(e) => setUserPromptsOnly(e.target.checked)}
+              className="w-3 h-3 accent-primary cursor-pointer"
             />
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={onClose} className="gap-2">
-              <Cross2Icon width={14} />
-              Close
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+            <span>Prompts only</span>
+          </label>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button className="p-1.5 rounded-lg text-muted-foreground hover:bg-card-alt">
+                <DotsHorizontalIcon width={16} />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-48">
+              <SessionDropdownMenuItems
+                projectId={session.project_id}
+                sessionId={session.id}
+                projectPath={session.project_path ?? undefined}
+                onExport={() => setExportDialogOpen(true)}
+              />
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={onClose} className="gap-2">
+                <Cross2Icon width={14} />
+                Close
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </header>
+
+      <div className="px-6">
+
 
       {loading ? (
         <div className="flex items-center justify-center py-12">
@@ -575,7 +597,17 @@ function SessionDetail({ session, onClose }: { session: Session; onClose: () => 
                 >
                   <Copy size={14} />
                 </button>
-                <p className="text-xs text-muted-foreground mb-2 uppercase tracking-wide">{msg.role}</p>
+                <p className="text-xs text-muted-foreground mb-2 uppercase tracking-wide flex items-center gap-2">
+                  <span>{msg.role}</span>
+                  {msg.timestamp && (
+                    <span
+                      className="normal-case tracking-normal opacity-0 group-hover:opacity-100 transition-opacity"
+                      title={new Date(msg.timestamp).toLocaleString()}
+                    >
+                      {new Date(msg.timestamp).toLocaleString()}
+                    </span>
+                  )}
+                </p>
                 {msg.content_blocks && !originalChat ? (
                   <ContentBlockRenderer blocks={msg.content_blocks} markdown={markdownPreview} />
                 ) : (
@@ -595,6 +627,7 @@ function SessionDetail({ session, onClose }: { session: Session; onClose: () => 
         onSelectedIdsChange={() => {}}
         defaultName={session.summary?.slice(0, 50).replace(/[/\\?%*:|"<>]/g, "-") || "session"}
       />
+      </div>
     </div>
   );
 }
