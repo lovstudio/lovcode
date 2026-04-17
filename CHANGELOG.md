@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.20
+
+### Patch Changes
+
+- Sticky session header with 'Prompts only' filter, hover timestamps, and resilient update-status display
+
 ## 0.24.19
 
 ### Patch Changes
