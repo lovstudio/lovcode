@@ -55,7 +55,7 @@ export function Home({ onFeatureClick, onProjectClick, onSessionClick, onSearch,
           <img src="/logo.png" alt="Lovcode" className="w-10 h-10" />
           Lovcode
         </h1>
-        <p className="text-muted-foreground">Your Vibe Coding Hub</p>
+        <p className="text-muted-foreground">The Super Creatorpreneur OS</p>
       </div>
 
       {/* Featured Carousel */}
