@@ -344,6 +344,31 @@ fn save_disabled_env(disabled: &serde_json::Map<String, Value>) -> Result<(), St
     Ok(())
 }
 
+fn get_provider_contexts_path() -> PathBuf {
+    get_lovstudio_dir().join("provider_contexts.json")
+}
+
+fn load_provider_contexts() -> Result<serde_json::Map<String, Value>, String> {
+    let path = get_provider_contexts_path();
+    if !path.exists() {
+        return Ok(serde_json::Map::new());
+    }
+    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let value: Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    Ok(value.as_object().cloned().unwrap_or_default())
+}
+
+fn save_provider_contexts(contexts: &serde_json::Map<String, Value>) -> Result<(), String> {
+    let path = get_provider_contexts_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let output = serde_json::to_string_pretty(&Value::Object(contexts.clone()))
+        .map_err(|e| e.to_string())?;
+    fs::write(&path, output).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Get path to ~/.claude.json (MCP servers config)
 fn get_claude_json_path() -> PathBuf {
     dirs::home_dir().unwrap().join(".claude.json")
@@ -5478,6 +5503,64 @@ fn update_disabled_settings_env(env_key: String, env_value: String) -> Result<()
 }
 
 // ============================================================================
+// Provider Context Commands (per-provider env persistence)
+// ============================================================================
+
+#[tauri::command]
+fn get_provider_contexts() -> Result<Value, String> {
+    let contexts = load_provider_contexts()?;
+    Ok(Value::Object(contexts))
+}
+
+#[tauri::command]
+fn set_provider_context_env(
+    provider_key: String,
+    env_key: String,
+    env_value: String,
+) -> Result<(), String> {
+    let mut contexts = load_provider_contexts()?;
+    let entry = contexts
+        .entry(provider_key)
+        .or_insert_with(|| serde_json::json!({ "env": {} }));
+    let obj = entry.as_object_mut().ok_or("provider context not object")?;
+    if !obj.get("env").and_then(|v| v.as_object()).is_some() {
+        obj.insert("env".to_string(), serde_json::json!({}));
+    }
+    obj["env"][&env_key] = Value::String(env_value);
+    save_provider_contexts(&contexts)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn snapshot_provider_context(
+    provider_key: String,
+    env_keys: Vec<String>,
+) -> Result<(), String> {
+    let settings_path = get_claude_dir().join("settings.json");
+    if !settings_path.exists() {
+        return Ok(());
+    }
+    let content = fs::read_to_string(&settings_path).map_err(|e| e.to_string())?;
+    let settings: Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    let env = settings.get("env").cloned().unwrap_or(serde_json::json!({}));
+
+    let mut snapshot = serde_json::Map::new();
+    for key in &env_keys {
+        if let Some(v) = env.get(key).and_then(|v| v.as_str()) {
+            snapshot.insert(key.clone(), Value::String(v.to_string()));
+        }
+    }
+
+    let mut contexts = load_provider_contexts()?;
+    contexts.insert(
+        provider_key,
+        serde_json::json!({ "env": Value::Object(snapshot) }),
+    );
+    save_provider_contexts(&contexts)?;
+    Ok(())
+}
+
+// ============================================================================
 // Settings Field Update Commands
 // ============================================================================
 
@@ -7990,6 +8073,9 @@ pub fn run() {
             disable_settings_env,
             enable_settings_env,
             update_disabled_settings_env,
+            get_provider_contexts,
+            set_provider_context_env,
+            snapshot_provider_context,
             update_settings_field,
             update_settings_permission_field,
             add_permission_directory,

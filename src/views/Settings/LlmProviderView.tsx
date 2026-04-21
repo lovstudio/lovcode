@@ -1,4 +1,4 @@
-import { useState, useEffect, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { FlaskConical } from "lucide-react";
@@ -44,6 +44,10 @@ export function LlmProviderView() {
 
   const queryClient = useQueryClient();
   const { data: settings, isLoading } = useInvokeQuery<ClaudeSettings>(["settings"], "get_settings");
+  const { data: providerContexts } = useInvokeQuery<Record<string, { env?: Record<string, string> }>>(
+    ["provider_contexts"],
+    "get_provider_contexts",
+  );
 
   const [search, setSearch] = useState("");
   const [applyStatus, setApplyStatus] = useState<Record<string, "idle" | "loading" | "success" | "error">>({});
@@ -54,22 +58,7 @@ export function LlmProviderView() {
   const [testMissingKeys, setTestMissingKeys] = useState<Record<string, string[]>>({});
   const [testMissingValues, setTestMissingValues] = useState<Record<string, Record<string, string>>>({});
   const [expandedPresetKey, setExpandedPresetKey] = useState<string | null>(null);
-  const [selectedModels, setSelectedModels] = useState<Record<string, string>>({
-    univibe: "claude-sonnet-4-5-20250929",
-    siliconflow: "moonshotai/Kimi-K2-Instruct-0905",
-  });
   const [analyticsEnabled, setAnalyticsEnabledState] = useState(isAnalyticsEnabled);
-
-  useEffect(() => {
-    if (!settings) return;
-    const envValue = settings.raw && typeof settings.raw === "object" ? (settings.raw as Record<string, unknown>).env : null;
-    if (envValue && typeof envValue === "object") {
-      const currentModel = (envValue as Record<string, unknown>).ANTHROPIC_MODEL;
-      if (typeof currentModel === "string" && currentModel) {
-        setSelectedModels((prev) => ({ ...prev, univibe: currentModel }));
-      }
-    }
-  }, [settings]);
 
   if (isLoading) return <LoadingState message="Loading settings..." />;
 
@@ -97,27 +86,6 @@ export function LlmProviderView() {
   };
 
   const rawEnv = getRawEnvFromSettings(settings);
-
-  const providerModels: Record<string, { id: string; label: string }[]> = {
-    univibe: [
-      { id: "claude-sonnet-4-5-20250929", label: "Claude Sonnet 4.5" },
-      { id: "claude-opus-4-5-20251101", label: "Claude Opus 4.5" },
-      { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
-    ],
-    siliconflow: [
-      { id: "moonshotai/Kimi-K2-Instruct-0905", label: "Kimi K2 Instruct" },
-      { id: "moonshotai/Kimi-K2-Thinking", label: "Kimi K2 Thinking" },
-      { id: "deepseek-ai/DeepSeek-V3.2", label: "DeepSeek V3.2" },
-      { id: "deepseek-ai/DeepSeek-V3.1-Terminus", label: "DeepSeek V3.1 Terminus" },
-      { id: "deepseek-ai/DeepSeek-R1", label: "DeepSeek R1" },
-      { id: "Qwen/Qwen3-Coder-480B-A35B-Instruct", label: "Qwen3 Coder 480B" },
-      { id: "Qwen/Qwen3-235B-A22B", label: "Qwen3 235B" },
-      { id: "Qwen/QwQ-32B", label: "QwQ 32B" },
-      { id: "zai-org/GLM-4.7", label: "GLM 4.7" },
-      { id: "THUDM/GLM-Z1-32B-0414", label: "GLM-Z1 32B" },
-      { id: "MiniMaxAI/MiniMax-M2", label: "MiniMax M2" },
-    ],
-  };
 
   const proxyPresets = [
     {
@@ -203,7 +171,7 @@ export function LlmProviderView() {
       path: "fallback/univibe-anthropic-proxy.json",
       description: "UniVibe proxy service, supports Claude Code / Codex / Cursor.",
       downloads: null,
-      content: JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: "cr_xxxxxxxxxxxxxxxxxx" } }, null, 2),
+      content: JSON.stringify({ env: { UNIVIBE_API_KEY: "cr_xxxxxxxxxxxxxxxxxx" } }, null, 2),
     },
     modelgate: {
       name: "modelgate-anthropic-proxy",
@@ -258,7 +226,7 @@ export function LlmProviderView() {
           ? (parsed.env as Record<string, unknown>)
           : {};
       const previewEnv = Object.fromEntries(
-        Object.keys(templateEnv).map((key) => [key, rawEnv[key] || ""])
+        Object.keys(templateEnv).map((key) => [key, getEnvValueForPreset(presetKey, key)])
       );
       return { env: previewEnv, note: null };
     } catch {
@@ -305,7 +273,7 @@ export function LlmProviderView() {
       setTestMissingKeys((prev) => ({ ...prev, [presetKey]: [] }));
 
       if (presetKey === "univibe") {
-        const authToken = (envSource.ANTHROPIC_AUTH_TOKEN || "").trim();
+        const authToken = (envSource.UNIVIBE_API_KEY || envSource.ANTHROPIC_AUTH_TOKEN || "").trim();
         const baseUrl = envSource.ANTHROPIC_BASE_URL || "https://api.univibe.cc/anthropic";
 
         try {
@@ -431,6 +399,7 @@ export function LlmProviderView() {
     zenmux: { ZENMUX_API_KEY: "ANTHROPIC_AUTH_TOKEN" },
     qiniu: { QINIU_API_KEY: "ANTHROPIC_AUTH_TOKEN" },
     modelgate: { MODELGATE_API_KEY: "ANTHROPIC_AUTH_TOKEN" },
+    univibe: { UNIVIBE_API_KEY: "ANTHROPIC_AUTH_TOKEN" },
     siliconflow: { SILICONFLOW_API_KEY: "ANTHROPIC_API_KEY" },
   };
 
@@ -467,16 +436,30 @@ export function LlmProviderView() {
     setApplyHint((prev) => ({ ...prev, [presetKey]: "" }));
 
     try {
+      if (activeProvider && activeProvider !== presetKey) {
+        const prevKeys = getTemplateEnvKeys(activeProvider);
+        if (prevKeys.length > 0) {
+          await invoke("snapshot_provider_context", {
+            providerKey: activeProvider,
+            envKeys: prevKeys,
+          });
+        }
+      }
+
       const parsed = JSON.parse(resolved.template.content);
       const keyMapping = presetEnvKeyMappings[presetKey] || {};
       const extraEnv = presetExtraEnv[presetKey] || {};
+      const contextEnv = getProviderContextEnv(presetKey);
 
       if (presetKey === "anthropic-subscription") {
         parsed.env = { CLAUDE_CODE_USE_OAUTH: "1" };
       } else if (parsed.env) {
         const templateKeys = Object.keys(parsed.env);
+        const isReapplyActive = activeProvider === presetKey;
         for (const key of templateKeys) {
-          if (rawEnv[key]) {
+          if (contextEnv[key] !== undefined && contextEnv[key] !== "") {
+            parsed.env[key] = contextEnv[key];
+          } else if (isReapplyActive && rawEnv[key]) {
             parsed.env[key] = rawEnv[key];
           }
         }
@@ -487,9 +470,6 @@ export function LlmProviderView() {
           }
         }
         Object.assign(parsed.env, extraEnv);
-        if (selectedModels[presetKey]) {
-          parsed.env.ANTHROPIC_MODEL = selectedModels[presetKey];
-        }
       }
 
       parsed.lovcode = { activeProvider: presetKey };
@@ -497,7 +477,7 @@ export function LlmProviderView() {
       await invoke("install_setting_template", { config: JSON.stringify(parsed, null, 2) });
       refreshSettings();
       setApplyStatus((prev) => ({ ...prev, [presetKey]: "success" }));
-      trackProviderEvent({ action: "apply", provider: presetKey, model: selectedModels[presetKey], success: true });
+      trackProviderEvent({ action: "apply", provider: presetKey, success: true });
 
       if (presetKey === "anthropic-subscription") {
         setApplyHint((prev) => ({
@@ -512,12 +492,36 @@ export function LlmProviderView() {
     } catch (e) {
       setApplyStatus((prev) => ({ ...prev, [presetKey]: "error" }));
       setApplyError(String(e));
-      trackProviderEvent({ action: "apply", provider: presetKey, model: selectedModels[presetKey], success: false, error_message: String(e) });
+      trackProviderEvent({ action: "apply", provider: presetKey, success: false, error_message: String(e) });
     }
   };
 
   const refreshSettings = () => {
     queryClient.invalidateQueries({ queryKey: ["settings"] });
+    queryClient.invalidateQueries({ queryKey: ["provider_contexts"] });
+  };
+
+  const getProviderContextEnv = (presetKey: string): Record<string, string> => {
+    const env = providerContexts?.[presetKey]?.env;
+    return env && typeof env === "object" ? env : {};
+  };
+
+  const getEnvValueForPreset = (presetKey: string, key: string): string => {
+    const ctx = getProviderContextEnv(presetKey);
+    if (ctx[key] !== undefined) return ctx[key];
+    if (activeProvider === presetKey) return rawEnv[key] || "";
+    return "";
+  };
+
+  const getTemplateEnvKeys = (presetKey: string): string[] => {
+    const resolved = getPresetTemplate(presetKey);
+    if (!resolved?.template?.content) return [];
+    try {
+      const parsed = JSON.parse(resolved.template.content) as { env?: Record<string, unknown> };
+      return parsed.env && typeof parsed.env === "object" ? Object.keys(parsed.env) : [];
+    } catch {
+      return [];
+    }
   };
 
   const handleMissingValueChange = (presetKey: string, key: string, value: string) => {
@@ -720,30 +724,22 @@ export function LlmProviderView() {
                           <input
                             className="text-xs px-2 py-1 rounded bg-canvas border border-border text-ink flex-1 font-mono"
                             placeholder="Enter value..."
-                            value={rawEnv[key] || ""}
+                            value={getEnvValueForPreset(preset.key, key)}
                             onChange={async (e) => {
-                              await invoke("update_settings_env", { envKey: key, envValue: e.target.value });
+                              const value = e.target.value;
+                              await invoke("set_provider_context_env", {
+                                providerKey: preset.key,
+                                envKey: key,
+                                envValue: value,
+                              });
+                              if (activeProvider === preset.key) {
+                                await invoke("update_settings_env", { envKey: key, envValue: value });
+                              }
                               await refreshSettings();
                             }}
                           />
                         </div>
                       ))}
-                      {providerModels[preset.key] && (
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs text-muted-foreground font-mono min-w-[10rem] shrink-0">ANTHROPIC_MODEL</span>
-                          <select
-                            className="text-xs px-2 py-1 rounded bg-canvas border border-border text-ink flex-1 font-mono"
-                            value={selectedModels[preset.key] || providerModels[preset.key][0]?.id}
-                            onChange={(e) => setSelectedModels((prev) => ({ ...prev, [preset.key]: e.target.value }))}
-                          >
-                            {providerModels[preset.key].map((m) => (
-                              <option key={m.id} value={m.id}>
-                                {m.label}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                      )}
                     </div>
                   ) : (
                     <p className="text-xs text-muted-foreground">No configuration required.</p>
