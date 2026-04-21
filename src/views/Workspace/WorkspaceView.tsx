@@ -573,49 +573,30 @@ export function WorkspaceView() {
 
   return (
     <div className="h-full flex flex-col bg-canvas">
-      {activeProject ? (
-        activeProject.view_mode === "dashboard" ? (
-          <ProjectDashboard project={activeProject} />
-        ) : (
-          <div className="flex-1 min-h-0">
-            <PanelGrid
-              panels={projectPanels}
-              layout={activeProject.layout}
-              activePanelId={activePanelId}
-              onPanelFocus={setActivePanelId}
-              onPanelClose={handlePanelClose}
-              onPanelSplit={handlePanelSplit}
-              onPanelToggleShared={handlePanelToggleShared}
-              onPanelReload={handlePanelReload}
-              onSessionAdd={handleSessionAdd}
-              onSessionClose={handleSessionClose}
-              onSessionSelect={handleSessionSelect}
-              onSessionTitleChange={handleSessionTitleChange}
-              onInitialPanelCreate={handleInitialPanelCreate}
-              projects={projectOptions}
-              activeProjectId={activeProject.id}
-              onSelectProject={handleSelectProject}
-              onAddFolder={handleAddProject}
-              direction="horizontal"
-            />
-          </div>
-        )
+      {activeProject && activeProject.view_mode === "dashboard" ? (
+        <ProjectDashboard project={activeProject} />
       ) : (
-        <div className="flex-1 flex items-center justify-center">
-          <div className="text-center">
-            <h2 className="font-serif text-2xl font-bold text-ink mb-2">
-              Welcome to Workspace
-            </h2>
-            <p className="text-muted-foreground mb-6">
-              Add a project to start parallel vibe coding
-            </p>
-            <button
-              onClick={handleAddProject}
-              className="px-6 py-3 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors"
-            >
-              Add Your First Project
-            </button>
-          </div>
+        <div className="flex-1 min-h-0">
+          <PanelGrid
+            panels={projectPanels}
+            layout={activeProject?.layout}
+            activePanelId={activePanelId}
+            onPanelFocus={setActivePanelId}
+            onPanelClose={handlePanelClose}
+            onPanelSplit={handlePanelSplit}
+            onPanelToggleShared={handlePanelToggleShared}
+            onPanelReload={handlePanelReload}
+            onSessionAdd={handleSessionAdd}
+            onSessionClose={handleSessionClose}
+            onSessionSelect={handleSessionSelect}
+            onSessionTitleChange={handleSessionTitleChange}
+            onInitialPanelCreate={handleInitialPanelCreate}
+            projects={projectOptions}
+            activeProjectId={activeProject?.id}
+            onSelectProject={handleSelectProject}
+            onAddFolder={handleAddProject}
+            direction="horizontal"
+          />
         </div>
       )}
     </div>

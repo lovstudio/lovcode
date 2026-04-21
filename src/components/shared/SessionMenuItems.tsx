@@ -1,5 +1,6 @@
+import { useAtom } from "jotai";
 import { invoke } from "@tauri-apps/api/core";
-import { FolderOpen, Copy, Download, Terminal } from "lucide-react";
+import { FolderOpen, Copy, Download, Terminal, Archive, ArchiveRestore } from "lucide-react";
 import { ExternalLinkIcon, ChatBubbleIcon } from "@radix-ui/react-icons";
 import {
   DropdownMenuItem,
@@ -11,6 +12,7 @@ import {
   ContextMenuCheckboxItem,
   ContextMenuSeparator,
 } from "@/components/ui/context-menu";
+import { archivedSessionIdsAtom } from "@/store";
 
 export interface SessionMenuConfig {
   projectId: string;
@@ -23,6 +25,9 @@ export interface SessionMenuConfig {
   onExport?: () => void;
   onResume?: () => void;
   onCopySessionId?: () => void;
+  /** Archive this session and every session after it in the visible list. Count is used for the label. */
+  onArchiveAllAfter?: () => void;
+  archiveAfterCount?: number;
 }
 
 // Shared handlers
@@ -43,6 +48,18 @@ export function useSessionMenuHandlers(projectId: string, sessionId: string) {
   return { handleReveal, handleOpenInEditor, handleCopyPath, handleCopySessionId, handleCopyResumeCommand };
 }
 
+// Archive state for a session (client-side hidden-in-sidebar flag)
+export function useSessionArchive(sessionId: string) {
+  const [archivedIds, setArchivedIds] = useAtom(archivedSessionIdsAtom);
+  const isArchived = archivedIds.includes(sessionId);
+  const toggleArchived = () => {
+    setArchivedIds((prev) =>
+      prev.includes(sessionId) ? prev.filter((id) => id !== sessionId) : [...prev, sessionId]
+    );
+  };
+  return { isArchived, toggleArchived };
+}
+
 // DropdownMenu items
 export function SessionDropdownMenuItems({
   projectId,
@@ -54,9 +71,12 @@ export function SessionDropdownMenuItems({
   setMarkdownPreview,
   onExport,
   onResume,
+  onArchiveAllAfter,
+  archiveAfterCount,
 }: SessionMenuConfig) {
   const { handleReveal, handleOpenInEditor, handleCopyPath, handleCopySessionId, handleCopyResumeCommand } =
     useSessionMenuHandlers(projectId, sessionId);
+  const { isArchived, toggleArchived } = useSessionArchive(sessionId);
 
   return (
     <>
@@ -74,6 +94,16 @@ export function SessionDropdownMenuItems({
         <DropdownMenuItem onClick={onResume} className="gap-2">
           <ChatBubbleIcon className="w-3.5 h-3.5" />
           Resume Session
+        </DropdownMenuItem>
+      )}
+      <DropdownMenuItem onClick={toggleArchived} className="gap-2">
+        {isArchived ? <ArchiveRestore size={14} /> : <Archive size={14} />}
+        {isArchived ? "Unarchive" : "Archive"}
+      </DropdownMenuItem>
+      {onArchiveAllAfter && archiveAfterCount !== undefined && archiveAfterCount > 0 && (
+        <DropdownMenuItem onClick={onArchiveAllAfter} className="gap-2">
+          <Archive size={14} />
+          Archive This and {archiveAfterCount} After
         </DropdownMenuItem>
       )}
       <DropdownMenuSeparator />
@@ -128,9 +158,12 @@ export function SessionContextMenuItems({
   setMarkdownPreview,
   onExport,
   onResume,
+  onArchiveAllAfter,
+  archiveAfterCount,
 }: SessionMenuConfig) {
   const { handleReveal, handleOpenInEditor, handleCopyPath, handleCopySessionId, handleCopyResumeCommand } =
     useSessionMenuHandlers(projectId, sessionId);
+  const { isArchived, toggleArchived } = useSessionArchive(sessionId);
 
   return (
     <>
@@ -148,6 +181,16 @@ export function SessionContextMenuItems({
         <ContextMenuItem onClick={onResume} className="gap-2">
           <ChatBubbleIcon className="w-3.5 h-3.5" />
           Resume Session
+        </ContextMenuItem>
+      )}
+      <ContextMenuItem onClick={toggleArchived} className="gap-2">
+        {isArchived ? <ArchiveRestore size={14} /> : <Archive size={14} />}
+        {isArchived ? "Unarchive" : "Archive"}
+      </ContextMenuItem>
+      {onArchiveAllAfter && archiveAfterCount !== undefined && archiveAfterCount > 0 && (
+        <ContextMenuItem onClick={onArchiveAllAfter} className="gap-2">
+          <Archive size={14} />
+          Archive This and {archiveAfterCount} After
         </ContextMenuItem>
       )}
       <ContextMenuSeparator />

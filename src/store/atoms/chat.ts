@@ -16,6 +16,10 @@ export const sidebarSessionSortByAtom = atomWithStorage<SessionSortBy>("lovcode:
 export type SidebarViewMode = "grouped" | "flat";
 export const sidebarViewModeAtom = atomWithStorage<SidebarViewMode>("lovcode:sidebar:viewMode", "grouped");
 
+// Archived sessions (hidden from sidebar by default, managed like a todo list)
+export const archivedSessionIdsAtom = atomWithStorage<string[]>("lovcode:sidebar:archivedSessionIds", []);
+export const showArchivedSessionsAtom = atomWithStorage("lovcode:sidebar:showArchived", false);
+
 // ProjectList
 export const chatViewModeAtom = atomWithStorage<"projects" | "sessions" | "chats">("lovcode:chatViewMode", "projects");
 export const allProjectsSortByAtom = atomWithStorage<"name" | "recent" | "sessions">("lovcode:allProjects:sortBy", "recent");

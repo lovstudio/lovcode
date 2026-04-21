@@ -281,10 +281,9 @@ export function PanelGrid({
             <img src="/logo.svg" alt="Lovcode" className="w-12 h-12" />
           </div>
 
-          {/* Two dropdowns side by side */}
-          <div className="flex items-center gap-3 w-full max-w-md">
-            {/* Project selector */}
-            {hasProjects && onSelectProject ? (
+          {/* Project selector */}
+          {hasProjects && onSelectProject ? (
+            <div className="flex items-center gap-3 w-full max-w-md">
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <button className={`${dropdownButtonClass} flex-1 min-w-0`}>
@@ -317,41 +316,8 @@ export function PanelGrid({
                   )}
                 </DropdownMenuContent>
               </DropdownMenu>
-            ) : null}
-
-            {/* Terminal type selector */}
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button className={`${dropdownButtonClass} flex-shrink-0`}>
-                  <div className="flex items-center gap-2 whitespace-nowrap">
-                    <DesktopIcon className="w-4 h-4 text-muted-foreground" />
-                    <span>{selectedTerminalType.label}</span>
-                  </div>
-                  <ChevronDownIcon className="w-4 h-4 text-muted-foreground" />
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="min-w-[140px]">
-                {TERMINAL_OPTIONS.map((opt) => (
-                  <DropdownMenuItem
-                    key={opt.type}
-                    onClick={() => {
-                      setSelectedTerminalType(opt);
-                      localStorage.setItem("lovcode:terminalType", opt.type);
-                      // Update menu state based on input
-                      if (inputCommand.startsWith("/")) {
-                        setShowSlashMenu(true);
-                        setSlashSelectedIndex(0);
-                      }
-                    }}
-                  >
-                    <span className={opt.type === selectedTerminalType.type ? "font-medium" : ""}>
-                      {opt.label}
-                    </span>
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
+            </div>
+          ) : null}
 
           {/* Super prompt box */}
           <div className="w-full max-w-md">
@@ -451,7 +417,36 @@ export function PanelGrid({
                   />
                 )
               ) : (
-                <div className="flex items-center justify-end px-3 py-2.5 border-t border-border bg-muted/30">
+                <div className="flex items-center justify-between gap-2 px-3 py-2.5 border-t border-border bg-muted/30">
+                  {/* Agent runtime selector */}
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <button className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-card rounded-md transition-colors">
+                        <DesktopIcon className="w-3.5 h-3.5" />
+                        <span>{selectedTerminalType.label}</span>
+                        <ChevronDownIcon className="w-3 h-3" />
+                      </button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start" className="min-w-[140px]">
+                      {TERMINAL_OPTIONS.map((opt) => (
+                        <DropdownMenuItem
+                          key={opt.type}
+                          onClick={() => {
+                            setSelectedTerminalType(opt);
+                            localStorage.setItem("lovcode:terminalType", opt.type);
+                            if (inputCommand.startsWith("/")) {
+                              setShowSlashMenu(true);
+                              setSlashSelectedIndex(0);
+                            }
+                          }}
+                        >
+                          <span className={opt.type === selectedTerminalType.type ? "font-medium" : ""}>
+                            {opt.label}
+                          </span>
+                        </DropdownMenuItem>
+                      ))}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                   <button
                     onClick={() => handleCreate(inputCommand || undefined)}
                     className="px-4 py-1.5 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors text-sm font-medium"
