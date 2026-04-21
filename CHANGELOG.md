@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.24.21
+
+### Patch Changes
+
+- - Sidebar action bar moved from footer to header
+  - Session archive / unarchive, plus bulk "archive this and all after" action
+  - Global toggle to show/hide archived sessions (persisted)
+  - Virtualized grouped + flat session lists (removed 100-item cap)
+  - Fix tooltip overlapping the 3-dot menu trigger in the sidebar
+  - PanelGrid Welcome: terminal-type selector moved next to the Create button
+  - WorkspaceView: unified Welcome state into PanelGrid
+
 ## 0.24.20
 
 ### Patch Changes
