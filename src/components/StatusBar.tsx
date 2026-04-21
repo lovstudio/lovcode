@@ -8,15 +8,13 @@
  */
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { useAtom, useAtomValue } from "jotai";
-import { profileAtom, workspaceDataAtom } from "../store";
+import { workspaceDataAtom } from "../store";
 import { invoke } from "@tauri-apps/api/core";
 import {
   FolderIcon,
   GitBranchIcon,
   CodeIcon,
   GlobeIcon,
-  ShieldCheckIcon,
-  UserIcon,
   ClockIcon,
   SettingsIcon,
 } from "lucide-react";
@@ -147,11 +145,9 @@ interface StatusBarProps {
 
 export function StatusBar({ onOpenSettings }: StatusBarProps) {
   const [workspace] = useAtom(workspaceDataAtom);
-  const [profile] = useAtom(profileAtom);
   const [time, setTime] = useState(new Date());
   const [networkInfo, setNetworkInfo] = useState<NetworkInfo | null>(null);
   const [todayStats, setTodayStats] = useState<TodayStats>({ lines_added: 0, lines_deleted: 0 });
-  const [proxyEnv, setProxyEnv] = useState<string | null>(null);
   const [settings, setSettings] = useState<StatusBarSettings | null>(null);
   const [scriptOutput, setScriptOutput] = useState<string | null>(null);
   const [homeDir, setHomeDir] = useState("");
@@ -271,30 +267,6 @@ export function StatusBar({ onOpenSettings }: StatusBarProps) {
     fetchNetworkInfo();
   }, [settings?.enabled]);
 
-  // Check proxy environment (only for default mode)
-  useEffect(() => {
-    if (settings?.enabled) return;
-
-    async function checkProxy() {
-      try {
-        const envProxy = await invoke<string | null>("get_env_var", { name: "HTTP_PROXY" });
-        const envHttpsProxy = await invoke<string | null>("get_env_var", { name: "HTTPS_PROXY" });
-        const proxy = envProxy || envHttpsProxy;
-        if (proxy) {
-          try {
-            const url = new URL(proxy);
-            setProxyEnv(url.hostname);
-          } catch {
-            setProxyEnv(proxy.slice(0, 20));
-          }
-        }
-      } catch {
-        // Silent fail
-      }
-    }
-    checkProxy();
-  }, [settings?.enabled]);
-
   const formatTime = useCallback((d: Date) => {
     return d.toLocaleTimeString("zh-CN", {
       hour: "2-digit",
@@ -350,7 +322,10 @@ export function StatusBar({ onOpenSettings }: StatusBarProps) {
     <div className="h-6 bg-card border-t border-border flex items-center justify-between px-3 text-xs text-muted-foreground select-none">
       {/* Left: Product name & version */}
       <div className="flex items-center gap-4">
-        <span className="font-medium text-ink">Lovcode</span>
+        <span className="flex items-center gap-1.5 font-medium text-ink">
+          <img src="/logo.svg" alt="Lovcode" className="w-3.5 h-3.5" />
+          Lovcode
+        </span>
         <VersionWithUpdateStatus />
 
         {/* Stats */}
@@ -375,14 +350,6 @@ export function StatusBar({ onOpenSettings }: StatusBarProps) {
 
       {/* Right: Time, Network, Account, Settings */}
       <div className="flex items-center gap-4">
-        {/* Proxy indicator */}
-        {proxyEnv && (
-          <div className="flex items-center gap-1 text-amber-600" title={`Proxy: ${proxyEnv}`}>
-            <ShieldCheckIcon className="w-3 h-3" />
-            <span>中转</span>
-          </div>
-        )}
-
         {/* Network region */}
         {networkInfo && (
           <div className="flex items-center gap-1" title={`IP: ${networkInfo.ip}`}>
@@ -400,14 +367,6 @@ export function StatusBar({ onOpenSettings }: StatusBarProps) {
           <span>{formatDate(time)}</span>
           <span className="font-mono">{formatTime(time)}</span>
         </div>
-
-        {/* Account */}
-        {profile.nickname && (
-          <div className="flex items-center gap-1 border-l border-border/50 pl-4">
-            <UserIcon className="w-3 h-3" />
-            <span>{profile.nickname}</span>
-          </div>
-        )}
 
         {/* Settings gear */}
         {onOpenSettings && (

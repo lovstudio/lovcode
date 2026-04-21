@@ -1,13 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Allotment } from "allotment";
 import "allotment/dist/style.css";
-import { ChevronLeftIcon, ChevronRightIcon, DrawingPinFilledIcon, ChevronDownIcon, FileIcon, DesktopIcon, RocketIcon, CodeIcon, GitHubLogoIcon } from "@radix-ui/react-icons";
+import { ChevronLeftIcon, ChevronRightIcon, DrawingPinFilledIcon, ChevronDownIcon, FileIcon, DesktopIcon, RocketIcon, CodeIcon, GitHubLogoIcon, MixerHorizontalIcon } from "@radix-ui/react-icons";
+import { CornerDownLeft } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 import { SessionPanel } from "./SessionPanel";
 import type { LayoutNode } from "../../views/Workspace/types";
 import { TERMINAL_OPTIONS, type ProjectOption } from "../ui/new-terminal-button";
 import { SlashCommandMenu, type CommandItem } from "../ui/slash-command-menu";
-import { useInvokeQuery } from "../../hooks";
-import type { LocalCommand, CodexCommand } from "../../types";
+import { useInvokeQuery, useQueryClient } from "../../hooks";
+import { ActivityHeatmap } from "../home";
+import { LLM_PROVIDER_PRESETS } from "../../constants";
+import type { LocalCommand, CodexCommand, Project, Session, ClaudeSettings } from "../../types";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -193,6 +197,14 @@ export function PanelGrid({
   const [slashFilter, setSlashFilter] = useState("");
   const [slashSelectedIndex, setSlashSelectedIndex] = useState(0);
 
+  // Track viewport height - hide quick actions when short
+  const [isShortViewport, setIsShortViewport] = useState(() => window.innerHeight < 640);
+  useEffect(() => {
+    const handleResize = () => setIsShortViewport(window.innerHeight < 640);
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
   // Fetch commands for autocomplete
   const { data: localCommands = [] } = useInvokeQuery<LocalCommand[]>(
     ["commands"],
@@ -202,6 +214,73 @@ export function PanelGrid({
     ["codexCommands"],
     "list_codex_commands"
   );
+
+  // Fetch activity data for the heatmap shown in the empty state
+  const { data: activityProjects = [] } = useInvokeQuery<Project[]>(["projects"], "list_projects");
+  const { data: activitySessions = [] } = useInvokeQuery<Session[]>(["sessions"], "list_all_sessions");
+  const { data: activityStats } = useInvokeQuery<{
+    daily: Record<string, number>;
+    hourly: Record<string, number>;
+    detailed: Record<string, number>;
+  }>(["activityStats"], "get_activity_stats");
+  const totalMessages = activitySessions.reduce((sum, s) => sum + s.message_count, 0);
+
+  // Claude settings -> active provider + model (for the prompt-box dropdown)
+  const { data: claudeSettings } = useInvokeQuery<ClaudeSettings>(["settings"], "get_settings");
+  const queryClient = useQueryClient();
+
+  const activeProviderKey = (() => {
+    const raw = claudeSettings?.raw;
+    if (!raw || typeof raw !== "object") return null;
+    const lovcode = (raw as Record<string, unknown>).lovcode;
+    if (!lovcode || typeof lovcode !== "object") return null;
+    const key = (lovcode as Record<string, unknown>).activeProvider;
+    return typeof key === "string" ? key : null;
+  })();
+  const activeProvider = LLM_PROVIDER_PRESETS.find(p => p.key === activeProviderKey) ?? null;
+
+  const savedModel = (() => {
+    const raw = claudeSettings?.raw;
+    if (!raw || typeof raw !== "object") return "";
+    const env = (raw as Record<string, unknown>).env;
+    if (!env || typeof env !== "object" || Array.isArray(env)) return "";
+    const m = (env as Record<string, unknown>).ANTHROPIC_MODEL;
+    return typeof m === "string" ? m : "";
+  })();
+
+  const [modelInput, setModelInput] = useState(savedModel);
+  useEffect(() => { setModelInput(savedModel); }, [savedModel]);
+
+  const handleProviderSelect = async (key: string) => {
+    if (key === activeProviderKey) return;
+    try {
+      // Preserve any other lovcode.* keys, only override activeProvider
+      const raw = claudeSettings?.raw;
+      const prevLovcode =
+        raw && typeof raw === "object" && (raw as Record<string, unknown>).lovcode &&
+        typeof (raw as Record<string, unknown>).lovcode === "object"
+          ? ((raw as Record<string, unknown>).lovcode as Record<string, unknown>)
+          : {};
+      await invoke("update_settings_field", {
+        field: "lovcode",
+        value: { ...prevLovcode, activeProvider: key },
+      });
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    } catch (e) {
+      console.error("Failed to switch provider:", e);
+    }
+  };
+
+  const handleModelCommit = async () => {
+    const trimmed = modelInput.trim();
+    if (trimmed === savedModel) return;
+    try {
+      await invoke("update_settings_env", { envKey: "ANTHROPIC_MODEL", envValue: trimmed, isNew: !savedModel });
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    } catch (e) {
+      console.error("Failed to update model:", e);
+    }
+  };
 
   // Get commands based on terminal type (both use / trigger)
   const commandItems: CommandItem[] = selectedTerminalType.type === "codex"
@@ -274,16 +353,11 @@ export function PanelGrid({
     const dropdownButtonClass = "inline-flex items-center justify-between gap-3 px-4 py-2.5 text-sm border border-border bg-card hover:bg-card-alt rounded-xl transition-colors";
 
     return (
-      <div className="h-full w-full flex items-start justify-center pt-[20vh] bg-canvas bg-[radial-gradient(#e5e5e5_1px,transparent_1px)] dark:bg-[radial-gradient(#333_1px,transparent_1px)] [background-size:20px_20px]">
-        <div className="flex flex-col items-center gap-5 w-full max-w-xl px-6">
-          {/* App logo */}
-          <div className="mb-2">
-            <img src="/logo.svg" alt="Lovcode" className="w-12 h-12" />
-          </div>
-
+      <div className="h-full w-full overflow-auto flex justify-center pt-8 pb-3 bg-canvas bg-[radial-gradient(#e5e5e5_1px,transparent_1px)] dark:bg-[radial-gradient(#333_1px,transparent_1px)] [background-size:20px_20px]">
+        <div className="flex flex-col items-center gap-5 w-full max-w-3xl px-6 min-h-full">
           {/* Project selector */}
           {hasProjects && onSelectProject ? (
-            <div className="flex items-center gap-3 w-full max-w-md">
+            <div className="flex items-center gap-3 w-full">
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <button className={`${dropdownButtonClass} flex-1 min-w-0`}>
@@ -319,15 +393,43 @@ export function PanelGrid({
             </div>
           ) : null}
 
-          {/* Super prompt box */}
-          <div className="w-full max-w-md">
-            <div className="border border-border rounded-2xl bg-card overflow-hidden shadow-sm">
+          {/* Activity heatmap + stats */}
+          {activityStats && (
+            <div className="w-full shrink-0 bg-card/50 rounded-2xl p-3 border border-border/40 overflow-hidden">
+              <ActivityHeatmap
+                daily={activityStats.daily}
+                detailed={activityStats.detailed}
+              />
+              <div className="flex items-center gap-6 mt-2 pt-2 border-t border-border/40 text-xs text-muted-foreground">
+                <span>
+                  <strong className="text-foreground font-serif">{activityProjects.length}</strong> workspaces
+                </span>
+                <span>
+                  <strong className="text-foreground font-serif">{activitySessions.length}</strong> sessions
+                </span>
+                <span>
+                  <strong className="text-foreground font-serif">{totalMessages}</strong> messages
+                </span>
+              </div>
+            </div>
+          )}
+
+
+          {/* Super prompt box - separated terminal-style input + controls */}
+          <div className="w-full shrink-0 mt-auto flex flex-col gap-2">
+            <div className="flex items-start gap-2 px-4 py-2.5 border border-border/60 rounded-xl bg-terminal shadow-sm overflow-hidden">
+              <span className="shrink-0 text-sm leading-6 font-mono text-primary/80 select-none">$</span>
               <textarea
                 ref={textareaRef}
+                rows={1}
                 value={inputCommand}
                 onChange={(e) => {
                   const value = e.target.value;
                   setInputCommand(value);
+                  // Auto-grow height
+                  const ta = e.target;
+                  ta.style.height = "auto";
+                  ta.style.height = `${ta.scrollHeight}px`;
 
                   // Show command menu when typing / without space (still selecting command)
                   // Once there's a space, user is typing arguments - hide menu
@@ -345,7 +447,7 @@ export function PanelGrid({
                     ? "Type / for commands, or describe what you want to do..."
                     : "Enter a command or describe what you want to do..."
                 }
-                className="w-full p-4 bg-transparent resize-none outline-none text-sm min-h-[80px] placeholder:text-muted-foreground/60"
+                className="flex-1 min-w-0 px-0 py-0 bg-transparent resize-none outline-none text-sm leading-6 font-mono text-neutral-100 caret-primary placeholder:text-neutral-500 overflow-hidden"
                 onCompositionStart={() => { composingRef.current = true; }}
                 onCompositionEnd={() => {
                   // Delay to next frame - some browsers fire compositionend BEFORE keydown
@@ -398,13 +500,21 @@ export function PanelGrid({
                   }
                 }}
               />
-              {/* Bottom area: command menu or start button */}
-              {showSlashMenu ? (
-                selectedTerminalType.type === "terminal" ? (
-                  <div className="px-3 py-2.5 border-t border-border bg-muted/30 text-sm text-muted-foreground">
-                    Slash commands are only available in Claude Code or Codex mode
-                  </div>
-                ) : (
+              <span
+                className="pointer-events-none shrink-0 inline-flex items-center h-6 text-neutral-500 select-none"
+                title="Press Enter to send"
+              >
+                <CornerDownLeft className="w-4 h-4" />
+              </span>
+            </div>
+            {/* Detached controls row: slash menu or selector + start */}
+            {showSlashMenu ? (
+              selectedTerminalType.type === "terminal" ? (
+                <div className="px-3 py-2.5 border border-border rounded-lg bg-card text-sm text-muted-foreground">
+                  Slash commands are only available in Claude Code or Codex mode
+                </div>
+              ) : (
+                <div className="border border-border rounded-lg bg-card overflow-hidden">
                   <SlashCommandMenu
                     commands={commandItems}
                     filter={slashFilter}
@@ -415,70 +525,87 @@ export function PanelGrid({
                       textareaRef.current?.focus();
                     }}
                   />
-                )
-              ) : (
-                <div className="flex items-center justify-between gap-2 px-3 py-2.5 border-t border-border bg-muted/30">
-                  {/* Agent runtime selector */}
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <button className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-card rounded-md transition-colors">
-                        <DesktopIcon className="w-3.5 h-3.5" />
-                        <span>{selectedTerminalType.label}</span>
-                        <ChevronDownIcon className="w-3 h-3" />
-                      </button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="start" className="min-w-[140px]">
-                      {TERMINAL_OPTIONS.map((opt) => (
-                        <DropdownMenuItem
-                          key={opt.type}
-                          onClick={() => {
-                            setSelectedTerminalType(opt);
-                            localStorage.setItem("lovcode:terminalType", opt.type);
-                            if (inputCommand.startsWith("/")) {
-                              setShowSlashMenu(true);
-                              setSlashSelectedIndex(0);
-                            }
-                          }}
-                        >
-                          <span className={opt.type === selectedTerminalType.type ? "font-medium" : ""}>
-                            {opt.label}
-                          </span>
-                        </DropdownMenuItem>
-                      ))}
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                  <button
-                    onClick={() => handleCreate(inputCommand || undefined)}
-                    className="px-4 py-1.5 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors text-sm font-medium"
-                  >
-                    Start
-                  </button>
                 </div>
-              )}
-            </div>
-          </div>
-
-          {/* Quick action cards */}
-          <div className="flex gap-2.5 w-full max-w-md">
-            {quickActions.map((action, i) => (
-              <button
-                key={i}
-                onClick={() => {
-                  if (selectedTerminalType.type === 'terminal') {
-                    handleCreate(action.code);
-                  } else {
-                    handleCreate(action.title);
-                  }
-                }}
-                className="flex-1 p-3 border border-border rounded-xl bg-card hover:bg-card-alt hover:border-primary/30 transition-all text-left group"
-              >
-                <action.icon className="w-4 h-4 text-muted-foreground mb-2 group-hover:text-primary transition-colors" />
-                <p className="text-xs text-foreground font-medium mb-1">{action.title}</p>
-                <code className="text-[10px] px-1.5 py-0.5 bg-muted rounded text-muted-foreground font-mono">
-                  {action.code}
-                </code>
-              </button>
-            ))}
+              )
+            ) : (
+              <div className="flex items-center justify-between gap-2 px-1">
+                {/* Agent runtime selector */}
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-card rounded-md transition-colors">
+                      <DesktopIcon className="w-3.5 h-3.5" />
+                      <span>{selectedTerminalType.label}</span>
+                      <ChevronDownIcon className="w-3 h-3" />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start" className="min-w-[140px]">
+                    {TERMINAL_OPTIONS.map((opt) => (
+                      <DropdownMenuItem
+                        key={opt.type}
+                        onClick={() => {
+                          setSelectedTerminalType(opt);
+                          localStorage.setItem("lovcode:terminalType", opt.type);
+                          if (inputCommand.startsWith("/")) {
+                            setShowSlashMenu(true);
+                            setSlashSelectedIndex(0);
+                          }
+                        }}
+                      >
+                        <span className={opt.type === selectedTerminalType.type ? "font-medium" : ""}>
+                          {opt.label}
+                        </span>
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                {/* Right: provider + model (only relevant for LLM modes) */}
+                {(selectedTerminalType.type === "claude" || selectedTerminalType.type === "codex") && (
+                  <div className="flex items-center gap-1.5">
+                    {/* Provider dropdown */}
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button
+                          className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-card rounded-md transition-colors"
+                          title="Active LLM provider"
+                        >
+                          <MixerHorizontalIcon className="w-3.5 h-3.5" />
+                          <span>{activeProvider?.label ?? "No provider"}</span>
+                          <ChevronDownIcon className="w-3 h-3" />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="min-w-[200px]">
+                        {LLM_PROVIDER_PRESETS.map((preset) => (
+                          <DropdownMenuItem
+                            key={preset.key}
+                            onClick={() => handleProviderSelect(preset.key)}
+                          >
+                            <span className={preset.key === activeProviderKey ? "font-medium" : ""}>
+                              {preset.label}
+                            </span>
+                          </DropdownMenuItem>
+                        ))}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                    {/* Model input */}
+                    <input
+                      type="text"
+                      value={modelInput}
+                      onChange={(e) => setModelInput(e.target.value)}
+                      onBlur={handleModelCommit}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          (e.target as HTMLInputElement).blur();
+                        }
+                      }}
+                      placeholder="model"
+                      spellCheck={false}
+                      className="w-36 px-2 py-1 text-xs font-mono bg-transparent border border-border rounded-md outline-none focus:border-primary/60 placeholder:text-muted-foreground/60"
+                    />
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>
