@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Allotment } from "allotment";
 import "allotment/dist/style.css";
-import { ChevronLeftIcon, ChevronRightIcon, DrawingPinFilledIcon, ChevronDownIcon, FileIcon, DesktopIcon, RocketIcon, CodeIcon, GitHubLogoIcon, MixerHorizontalIcon } from "@radix-ui/react-icons";
+import { ChevronLeftIcon, ChevronRightIcon, DrawingPinFilledIcon, ChevronDownIcon, FileIcon, DesktopIcon, MixerHorizontalIcon } from "@radix-ui/react-icons";
 import { CornerDownLeft, FolderOpenIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -205,14 +205,6 @@ export function PanelGrid({
   const [slashFilter, setSlashFilter] = useState("");
   const [slashSelectedIndex, setSlashSelectedIndex] = useState(0);
 
-  // Track viewport height - hide quick actions when short
-  const [isShortViewport, setIsShortViewport] = useState(() => window.innerHeight < 640);
-  useEffect(() => {
-    const handleResize = () => setIsShortViewport(window.innerHeight < 640);
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
-  }, []);
-
   // Fetch commands for autocomplete
   const { data: localCommands = [] } = useInvokeQuery<LocalCommand[]>(
     ["commands"],
@@ -381,13 +373,6 @@ export function PanelGrid({
         onInitialPanelCreate(command, initialInput);
       }
     };
-
-    // Quick action cards data
-    const quickActions = [
-      { icon: RocketIcon, title: "Start dev server", code: "pnpm dev" },
-      { icon: GitHubLogoIcon, title: "Check git status", code: "git status" },
-      { icon: CodeIcon, title: "Run tests", code: "pnpm test" },
-    ];
 
     // Common dropdown button style
     const dropdownButtonClass = "inline-flex items-center justify-between gap-3 px-4 py-2.5 text-sm border border-border bg-card hover:bg-card-alt rounded-xl transition-colors";

@@ -130,6 +130,7 @@ export default function RootLayout() {
       "chat": "/chat",
       "basic-env": "/settings/env",
       "basic-llm": "/settings/llm",
+      "basic-maas": "/settings/maas",
       "basic-version": "/settings/version",
       "basic-context": "/settings/context",
       "settings": "/settings",

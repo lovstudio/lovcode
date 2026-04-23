@@ -11,7 +11,7 @@ export { FeaturesView, FeaturesLayout } from "./Features";
 export { CommandsView, CommandDetailView, CommandItemCard } from "./Commands";
 export { MarketplaceView, MarketplaceLayout, TemplateDetailView } from "./Marketplace";
 export { DistillMenu, DistillView, DistillDetailView, ReferenceView, KnowledgeLayout } from "./Knowledge";
-export { SettingsView, EnvSettingsView, LlmProviderView, ClaudeVersionView, ContextFilesView, ClaudeCodeVersionSection } from "./Settings";
+export { SettingsView, EnvSettingsView, LlmProviderView, MaasRegistryView, ClaudeVersionView, ContextFilesView, ClaudeCodeVersionSection } from "./Settings";
 export { WorkspaceView } from "./Workspace";
 export { AnnualReport2025 } from "./AnnualReport";
 export {
