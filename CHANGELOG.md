@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.25.0
+
+### Minor Changes
+
+- MaaS registry management + events page + workspace consolidation
+
+  - Added MaaS (Model-as-a-Service) provider registry with 4 new Tauri commands (get/save/upsert/delete) for managing custom model providers persistently
+  - New `/settings/maas` page with `MaasRegistryView` UI for adding/editing provider entries
+  - New `/events` page
+  - Extracted LLM provider presets to `LLM_PROVIDER_PRESETS` constant (DRY refactor)
+  - Consolidated standalone Home view into `WorkspaceView`
+
 ## 0.24.22
 
 ### Patch Changes

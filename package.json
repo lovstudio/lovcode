@@ -1,7 +1,7 @@
 {
   "name": "lovcode",
   "private": true,
-  "version": "0.24.22",
+  "version": "0.25.0",
   "type": "module",
   "packageManager": "pnpm@10.18.1",
   "scripts": {
