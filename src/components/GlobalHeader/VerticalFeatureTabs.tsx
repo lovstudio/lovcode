@@ -1,6 +1,7 @@
-import { useState, useRef, useCallback, useMemo, type CSSProperties } from "react";
+import { useState, useRef, useCallback, useEffect, useMemo, type CSSProperties } from "react";
 import { useAtom, useSetAtom } from "jotai";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { listen } from "@tauri-apps/api/event";
 import {
   ChevronDownIcon,
   ChevronRightIcon,
@@ -22,7 +23,7 @@ import {
   showArchivedSessionsAtom,
   type SessionSortBy,
 } from "@/store";
-import { useNavigate, useInvokeQuery } from "@/hooks";
+import { useNavigate, useInvokeQuery, useQueryClient } from "@/hooks";
 import { invoke } from "@tauri-apps/api/core";
 import type { Project, Session, Message } from "@/types";
 import {
@@ -191,12 +192,24 @@ export function VerticalFeatureTabs() {
   const [showArchived, setShowArchived] = useAtom(showArchivedSessionsAtom);
   const [isResizing, setIsResizing] = useState(false);
   const resizeRef = useRef<HTMLDivElement>(null);
+  const queryClient = useQueryClient();
 
   // Auto-discover CC projects from ~/.claude/projects/
   const { data: ccProjects = [], isLoading: projectsLoading } = useInvokeQuery<Project[]>(
     ["cc-projects"],
     "list_projects"
   );
+
+  // Watch backend-emitted session changes (new jsonl files, appended messages, deletions)
+  useEffect(() => {
+    const unlisten = listen("sessions-changed", () => {
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      queryClient.invalidateQueries({ queryKey: ["cc-projects"] });
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [queryClient]);
 
   // Fetch all sessions once, shared across views
   const { data: allSessions = [], isLoading: sessionsLoading } = useInvokeQuery<Session[]>(
@@ -350,13 +363,11 @@ export function VerticalFeatureTabs() {
 type GroupedRow =
   | { kind: "header"; project: Project; projectSessions: Session[]; isCollapsed: boolean }
   | { kind: "session"; project: Project; session: Session; index: number; projectSessions: Session[] }
-  | { kind: "empty"; project: Project }
   | { kind: "spacer" };
 
 const HEADER_ROW_HEIGHT = 40;
 const SESSION_ROW_HEIGHT = 28;
 const SPACER_ROW_HEIGHT = 4;
-const EMPTY_ROW_HEIGHT = 24;
 
 function GroupedView({
   projects,
@@ -379,31 +390,33 @@ function GroupedView({
     const byId = new Map<string, Session[]>();
 
     const rowList: GroupedRow[] = [];
-    projects.forEach((project, projectIdx) => {
-      const projectPathNorm = normalizePath(project.path);
-      const projectSessions = allSessions
-        .filter((s) => {
-          if (!s.project_path) return false;
-          return normalizePath(s.project_path) === projectPathNorm && s.message_count > 0;
-        })
-        .sort((a, b) => {
-          if (sortBy === "created") return b.created_at - a.created_at;
-          if (sortBy === "path") return (a.summary ?? "").localeCompare(b.summary ?? "");
-          return b.last_modified - a.last_modified;
-        });
+    const nonEmptyProjects = projects
+      .map((project) => {
+        const projectPathNorm = normalizePath(project.path);
+        const projectSessions = allSessions
+          .filter((s) => {
+            if (!s.project_path) return false;
+            return normalizePath(s.project_path) === projectPathNorm && s.message_count > 0;
+          })
+          .sort((a, b) => {
+            if (sortBy === "created") return b.created_at - a.created_at;
+            if (sortBy === "path") return (a.summary ?? "").localeCompare(b.summary ?? "");
+            return b.last_modified - a.last_modified;
+          });
+        return { project, projectSessions };
+      })
+      .filter(({ projectSessions }) => projectSessions.length > 0);
+
+    nonEmptyProjects.forEach(({ project, projectSessions }, projectIdx) => {
       byId.set(project.id, projectSessions);
 
       const isCollapsed = collapsedGroups.includes(project.id);
       if (projectIdx > 0) rowList.push({ kind: "spacer" });
       rowList.push({ kind: "header", project, projectSessions, isCollapsed });
       if (!isCollapsed) {
-        if (projectSessions.length === 0) {
-          rowList.push({ kind: "empty", project });
-        } else {
-          projectSessions.forEach((session, index) => {
-            rowList.push({ kind: "session", project, session, index, projectSessions });
-          });
-        }
+        projectSessions.forEach((session, index) => {
+          rowList.push({ kind: "session", project, session, index, projectSessions });
+        });
       }
     });
 
@@ -417,7 +430,6 @@ function GroupedView({
       const r = rows[i];
       if (r.kind === "header") return HEADER_ROW_HEIGHT;
       if (r.kind === "spacer") return SPACER_ROW_HEIGHT;
-      if (r.kind === "empty") return EMPTY_ROW_HEIGHT;
       return SESSION_ROW_HEIGHT;
     },
     overscan: 8,
@@ -453,14 +465,6 @@ function GroupedView({
                   isCollapsed={row.isCollapsed}
                   onToggleCollapse={() => onToggleCollapse(row.project.id)}
                 />
-              </div>
-            );
-          }
-
-          if (row.kind === "empty") {
-            return (
-              <div key={vi.key} style={style} className="px-2">
-                <div className="ml-4 text-xs text-muted-foreground px-2 py-1">No sessions</div>
               </div>
             );
           }

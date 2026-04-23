@@ -58,6 +58,7 @@ function parseUrlToView(hash: string): View {
       switch (second) {
         case "env": return { type: "basic-env" };
         case "llm": return { type: "basic-llm" };
+        case "maas": return { type: "basic-maas" };
         case "version": return { type: "basic-version" };
         case "context": return { type: "basic-context" };
         default: return { type: "settings" };

@@ -294,6 +294,46 @@ export function WorkspaceView() {
     setActivePanelId(panelId);
   }, [activeProject, saveWorkspace, setActivePanelId]);
 
+  // Browse-and-start: register an arbitrary folder then start a terminal in it
+  const handleBrowseFolder = useCallback(async (path: string, command?: string, initialInput?: string) => {
+    try {
+      // Reuse existing project if the path matches one already registered
+      const existing = workspace?.projects.find((p) => p.path === path);
+      const project = existing
+        ? existing
+        : await invoke<WorkspaceProject>("workspace_add_project", { path });
+
+      const panelId = crypto.randomUUID();
+      const sessionId = crypto.randomUUID();
+      const ptyId = crypto.randomUUID();
+      const title = command?.startsWith("claude") ? "Claude Code" : command?.startsWith("codex") ? "Codex" : "Terminal";
+
+      const newPanel: StoredPanelState = {
+        id: panelId,
+        sessions: [{ id: sessionId, pty_id: ptyId, title, command, initial_input: initialInput }],
+        active_session_id: sessionId,
+        is_shared: false,
+        cwd: project.path,
+      };
+
+      saveWorkspace((current) => {
+        const projects = existing
+          ? current.projects
+          : [...current.projects, project];
+        const newProjects = projects.map((p) =>
+          p.id === project.id
+            ? { ...p, panels: [newPanel], layout: { type: "panel" as const, panelId } }
+            : p
+        );
+        return { ...current, projects: newProjects, active_project_id: project.id };
+      });
+
+      setActivePanelId(panelId);
+    } catch (err) {
+      console.error("Failed to browse folder:", err);
+    }
+  }, [workspace, saveWorkspace, setActivePanelId]);
+
   // Create panel in a specific project (for project selection in empty state)
   const handleSelectProject = useCallback((project: ProjectOption, command?: string, initialInput?: string) => {
     const panelId = crypto.randomUUID();
@@ -595,6 +635,7 @@ export function WorkspaceView() {
             activeProjectId={activeProject?.id}
             onSelectProject={handleSelectProject}
             onAddFolder={handleAddProject}
+            onBrowseFolder={handleBrowseFolder}
             direction="horizontal"
           />
         </div>

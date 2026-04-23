@@ -369,6 +369,134 @@ fn save_provider_contexts(contexts: &serde_json::Map<String, Value>) -> Result<(
     Ok(())
 }
 
+// ============================================================================
+// MaaS Registry (provider + model mappings for empty-state cascading picker)
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MaasModel {
+    id: String,
+    display_name: String,
+    model_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MaasProvider {
+    key: String,
+    label: String,
+    base_url: String,
+    auth_env_key: String,
+    models: Vec<MaasModel>,
+}
+
+fn get_maas_registry_path() -> PathBuf {
+    get_lovstudio_dir().join("maas_registry.json")
+}
+
+fn default_maas_registry() -> Vec<MaasProvider> {
+    fn m(id: &str, display: &str, name: &str) -> MaasModel {
+        MaasModel {
+            id: id.to_string(),
+            display_name: display.to_string(),
+            model_name: name.to_string(),
+        }
+    }
+    let anthropic_native_models = vec![
+        m("opus-4-7", "Claude Opus 4.7", "claude-opus-4-7-20251101"),
+        m("sonnet-4-6", "Claude Sonnet 4.6", "claude-sonnet-4-6-20251001"),
+        m("haiku-4-5", "Claude Haiku 4.5", "claude-haiku-4-5-20250930"),
+    ];
+    vec![
+        MaasProvider {
+            key: "anthropic-subscription".into(),
+            label: "Anthropic Subscription".into(),
+            base_url: "".into(),
+            auth_env_key: "CLAUDE_CODE_USE_OAUTH".into(),
+            models: anthropic_native_models.clone(),
+        },
+        MaasProvider {
+            key: "native".into(),
+            label: "Anthropic API".into(),
+            base_url: "https://api.anthropic.com".into(),
+            auth_env_key: "ANTHROPIC_API_KEY".into(),
+            models: anthropic_native_models,
+        },
+        MaasProvider {
+            key: "zenmux".into(),
+            label: "ZenMux".into(),
+            base_url: "https://zenmux.ai/api/anthropic".into(),
+            auth_env_key: "ZENMUX_API_KEY".into(),
+            models: vec![
+                m("sonnet-4-6", "Claude Sonnet 4.6", "anthropic/claude-sonnet-4-6-20251001"),
+                m("sonnet-4-5", "Claude Sonnet 4.5", "anthropic/claude-sonnet-4.5"),
+                m("haiku-4-5", "Claude Haiku 4.5", "anthropic/claude-haiku-4.5"),
+            ],
+        },
+        MaasProvider {
+            key: "modelgate".into(),
+            label: "ModelGate".into(),
+            base_url: "https://mg.aid.pub/claude-proxy".into(),
+            auth_env_key: "MODELGATE_API_KEY".into(),
+            models: vec![
+                m("sonnet-4-6", "Claude Sonnet 4.6", "anthropic/claude-sonnet-4-6-20251001"),
+                m("sonnet-4-5", "Claude Sonnet 4.5", "anthropic/claude-sonnet-4.5"),
+                m("haiku-4-5", "Claude Haiku 4.5", "anthropic/claude-haiku-4.5"),
+            ],
+        },
+        MaasProvider {
+            key: "qiniu".into(),
+            label: "Qiniu Cloud".into(),
+            base_url: "https://api.qnaigc.com".into(),
+            auth_env_key: "QINIU_API_KEY".into(),
+            models: vec![
+                m("sonnet-4-6", "Claude Sonnet 4.6", "claude-sonnet-4-6-20251001"),
+                m("haiku-4-5", "Claude Haiku 4.5", "claude-haiku-4-5-20250930"),
+            ],
+        },
+        MaasProvider {
+            key: "siliconflow".into(),
+            label: "SiliconFlow".into(),
+            base_url: "https://api.siliconflow.com/v1".into(),
+            auth_env_key: "SILICONFLOW_API_KEY".into(),
+            models: vec![
+                m("sonnet-4-5", "Claude Sonnet 4.5", "claude-sonnet-4-5"),
+                m("haiku-4-5", "Claude Haiku 4.5", "claude-haiku-4-5"),
+            ],
+        },
+        MaasProvider {
+            key: "univibe".into(),
+            label: "UniVibe".into(),
+            base_url: "https://api.univibe.cc/anthropic".into(),
+            auth_env_key: "UNIVIBE_API_KEY".into(),
+            models: vec![
+                m("sonnet-4-6", "Claude Sonnet 4.6", "claude-sonnet-4-6-20251001"),
+                m("haiku-4-5", "Claude Haiku 4.5", "claude-haiku-4-5-20250930"),
+            ],
+        },
+    ]
+}
+
+fn load_maas_registry() -> Result<Vec<MaasProvider>, String> {
+    let path = get_maas_registry_path();
+    if !path.exists() {
+        return Ok(default_maas_registry());
+    }
+    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    serde_json::from_str(&content).map_err(|e| e.to_string())
+}
+
+fn persist_maas_registry(registry: &[MaasProvider]) -> Result<(), String> {
+    let path = get_maas_registry_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let output = serde_json::to_string_pretty(registry).map_err(|e| e.to_string())?;
+    fs::write(&path, output).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Get path to ~/.claude.json (MCP servers config)
 fn get_claude_json_path() -> PathBuf {
     dirs::home_dir().unwrap().join(".claude.json")
@@ -5561,6 +5689,39 @@ fn snapshot_provider_context(
 }
 
 // ============================================================================
+// MaaS Registry Commands
+// ============================================================================
+
+#[tauri::command]
+fn get_maas_registry() -> Result<Vec<MaasProvider>, String> {
+    load_maas_registry()
+}
+
+#[tauri::command]
+fn save_maas_registry(registry: Vec<MaasProvider>) -> Result<(), String> {
+    persist_maas_registry(&registry)
+}
+
+#[tauri::command]
+fn upsert_maas_provider(provider: MaasProvider) -> Result<Vec<MaasProvider>, String> {
+    let mut registry = load_maas_registry()?;
+    match registry.iter().position(|p| p.key == provider.key) {
+        Some(idx) => registry[idx] = provider,
+        None => registry.push(provider),
+    }
+    persist_maas_registry(&registry)?;
+    Ok(registry)
+}
+
+#[tauri::command]
+fn delete_maas_provider(key: String) -> Result<Vec<MaasProvider>, String> {
+    let mut registry = load_maas_registry()?;
+    registry.retain(|p| p.key != key);
+    persist_maas_registry(&registry)?;
+    Ok(registry)
+}
+
+// ============================================================================
 // Settings Field Update Commands
 // ============================================================================
 
@@ -7903,6 +8064,39 @@ pub fn run() {
                 }
             });
 
+            // Start watching ~/.claude/projects/ for session changes (new/updated jsonl files)
+            let app_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                let projects_dir = get_claude_dir().join("projects");
+                if !projects_dir.exists() {
+                    let _ = fs::create_dir_all(&projects_dir);
+                }
+
+                let (tx, rx) = channel();
+                let mut watcher: RecommendedWatcher = match notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
+                    if let Ok(event) = res {
+                        if event.kind.is_create() || event.kind.is_modify() || event.kind.is_remove() {
+                            let _ = tx.send(());
+                        }
+                    }
+                }) {
+                    Ok(w) => w,
+                    Err(_) => return,
+                };
+
+                if watcher.watch(&projects_dir, RecursiveMode::Recursive).is_err() {
+                    return;
+                }
+
+                loop {
+                    if rx.recv().is_ok() {
+                        // Debounce burst of writes from jsonl appends
+                        while rx.recv_timeout(Duration::from_millis(500)).is_ok() {}
+                        let _ = app_handle.emit("sessions-changed", ());
+                    }
+                }
+            });
+
             let settings = MenuItemBuilder::with_id("settings", "Settings...")
                 .accelerator("CmdOrCtrl+,")
                 .build(app)?;
@@ -8076,6 +8270,10 @@ pub fn run() {
             get_provider_contexts,
             set_provider_context_env,
             snapshot_provider_context,
+            get_maas_registry,
+            save_maas_registry,
+            upsert_maas_provider,
+            delete_maas_provider,
             update_settings_field,
             update_settings_permission_field,
             add_permission_directory,

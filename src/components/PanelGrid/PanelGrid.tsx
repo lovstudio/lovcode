@@ -2,8 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Allotment } from "allotment";
 import "allotment/dist/style.css";
 import { ChevronLeftIcon, ChevronRightIcon, DrawingPinFilledIcon, ChevronDownIcon, FileIcon, DesktopIcon, RocketIcon, CodeIcon, GitHubLogoIcon, MixerHorizontalIcon } from "@radix-ui/react-icons";
-import { CornerDownLeft } from "lucide-react";
+import { CornerDownLeft, FolderOpenIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { SessionPanel } from "./SessionPanel";
 import type { LayoutNode } from "../../views/Workspace/types";
 import { TERMINAL_OPTIONS, type ProjectOption } from "../ui/new-terminal-button";
@@ -11,7 +12,7 @@ import { SlashCommandMenu, type CommandItem } from "../ui/slash-command-menu";
 import { useInvokeQuery, useQueryClient } from "../../hooks";
 import { ActivityHeatmap } from "../home";
 import { LLM_PROVIDER_PRESETS } from "../../constants";
-import type { LocalCommand, CodexCommand, Project, Session, ClaudeSettings } from "../../types";
+import type { LocalCommand, CodexCommand, Project, Session, ClaudeSettings, MaasProvider } from "../../types";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -63,6 +64,8 @@ export interface PanelGridProps {
   onSelectProject?: (project: ProjectOption, command?: string, initialInput?: string) => void;
   /** Called when user wants to add a new folder */
   onAddFolder?: () => void;
+  /** Called when user picks a folder via native dialog to start a terminal in */
+  onBrowseFolder?: (path: string, command?: string, initialInput?: string) => void;
 }
 
 /** Recursively render layout tree */
@@ -178,9 +181,14 @@ export function PanelGrid({
   activeProjectId,
   onSelectProject,
   onAddFolder,
+  onBrowseFolder,
 }: PanelGridProps) {
   // Selected project for empty state (default to active project)
   const [selectedProjectId, setSelectedProjectId] = useState<string | undefined>(activeProjectId);
+  // Last folder browsed via native picker (persisted); displayed in folder chip even if not registered
+  const [lastBrowsedPath, setLastBrowsedPath] = useState<string | null>(() =>
+    localStorage.getItem("lovcode:customCwd")
+  );
   // Selected terminal type for empty state (persisted)
   const [selectedTerminalType, setSelectedTerminalType] = useState(() => {
     const saved = localStorage.getItem("lovcode:terminalType");
@@ -227,6 +235,10 @@ export function PanelGrid({
 
   // Claude settings -> active provider + model (for the prompt-box dropdown)
   const { data: claudeSettings } = useInvokeQuery<ClaudeSettings>(["settings"], "get_settings");
+  const { data: maasRegistry = [] } = useInvokeQuery<MaasProvider[]>(
+    ["maas_registry"],
+    "get_maas_registry",
+  );
   const queryClient = useQueryClient();
 
   const activeProviderKey = (() => {
@@ -248,8 +260,10 @@ export function PanelGrid({
     return typeof m === "string" ? m : "";
   })();
 
-  const [modelInput, setModelInput] = useState(savedModel);
-  useEffect(() => { setModelInput(savedModel); }, [savedModel]);
+  // Models offered for the current provider (from MaaS registry, keyed on activeProviderKey)
+  const maasProvider = maasRegistry.find((p) => p.key === activeProviderKey) ?? null;
+  const currentMaasModel =
+    maasProvider?.models.find((m) => m.modelName === savedModel) ?? null;
 
   const handleProviderSelect = async (key: string) => {
     if (key === activeProviderKey) return;
@@ -271,14 +285,34 @@ export function PanelGrid({
     }
   };
 
-  const handleModelCommit = async () => {
-    const trimmed = modelInput.trim();
-    if (trimmed === savedModel) return;
+  const handleModelSelect = async (modelName: string) => {
+    if (modelName === savedModel) return;
     try {
-      await invoke("update_settings_env", { envKey: "ANTHROPIC_MODEL", envValue: trimmed, isNew: !savedModel });
+      await invoke("update_settings_env", { envKey: "ANTHROPIC_MODEL", envValue: modelName, isNew: !savedModel });
       queryClient.invalidateQueries({ queryKey: ["settings"] });
     } catch (e) {
       console.error("Failed to update model:", e);
+    }
+  };
+
+  const handleBrowseFolder = async () => {
+    try {
+      let defaultPath = lastBrowsedPath ?? undefined;
+      if (!defaultPath) {
+        try {
+          defaultPath = await invoke<string>("get_home_dir");
+        } catch {
+          defaultPath = undefined;
+        }
+      }
+      const selected = await openDialog({ directory: true, multiple: false, defaultPath });
+      if (selected && typeof selected === "string") {
+        setLastBrowsedPath(selected);
+        localStorage.setItem("lovcode:customCwd", selected);
+        setSelectedProjectId(undefined);
+      }
+    } catch (e) {
+      console.error("Failed to browse folder:", e);
     }
   };
 
@@ -317,7 +351,11 @@ export function PanelGrid({
 
   if (panels.length === 0) {
     const hasProjects = projects && projects.length > 0;
-    const selectedProject = projects?.find((p) => p.id === selectedProjectId) || projects?.[0];
+    const registeredSelected = projects?.find((p) => p.id === selectedProjectId);
+    // When selectedProjectId is explicitly undefined (after Browse), don't fall back to projects[0]
+    const usingBrowsedPath = selectedProjectId === undefined && !!lastBrowsedPath;
+    const selectedProject = usingBrowsedPath ? undefined : (registeredSelected || projects?.[0]);
+    const browsedFolderName = lastBrowsedPath ? lastBrowsedPath.split("/").filter(Boolean).at(-1) ?? lastBrowsedPath : null;
 
     const handleCreate = (userInput?: string) => {
       // For claude/codex, append user input as argument to command
@@ -335,7 +373,9 @@ export function PanelGrid({
         }
       }
 
-      if (selectedProject && onSelectProject) {
+      if (usingBrowsedPath && lastBrowsedPath && onBrowseFolder) {
+        onBrowseFolder(lastBrowsedPath, command, initialInput);
+      } else if (selectedProject && onSelectProject) {
         onSelectProject(selectedProject, command, initialInput);
       } else if (onInitialPanelCreate) {
         onInitialPanelCreate(command, initialInput);
@@ -355,38 +395,54 @@ export function PanelGrid({
     return (
       <div className="h-full w-full overflow-auto flex justify-center pt-8 pb-3 bg-canvas bg-[radial-gradient(#e5e5e5_1px,transparent_1px)] dark:bg-[radial-gradient(#333_1px,transparent_1px)] [background-size:20px_20px]">
         <div className="flex flex-col items-center gap-5 w-full max-w-3xl px-6 min-h-full">
-          {/* Project selector */}
-          {hasProjects && onSelectProject ? (
+          {/* Project / folder selector */}
+          {(hasProjects && onSelectProject) || onBrowseFolder ? (
             <div className="flex items-center gap-3 w-full">
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <button className={`${dropdownButtonClass} flex-1 min-w-0`}>
                     <div className="flex items-center gap-2 min-w-0">
                       <FileIcon className="w-4 h-4 text-muted-foreground flex-shrink-0" />
-                      <span className="truncate">{selectedProject?.name || "Select folder"}</span>
+                      <span className="truncate">
+                        {usingBrowsedPath
+                          ? browsedFolderName ?? "Browsed folder"
+                          : selectedProject?.name || "Select folder"}
+                      </span>
                     </div>
                     <ChevronDownIcon className="w-4 h-4 text-muted-foreground flex-shrink-0" />
                   </button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start" className="min-w-[200px]">
-                  {projects.map((project) => (
+                  {projects?.map((project) => (
                     <DropdownMenuItem
                       key={project.id}
                       onClick={() => setSelectedProjectId(project.id)}
                     >
-                      <span className={`truncate ${project.id === selectedProjectId ? "font-medium" : ""}`}>
+                      <span className={`truncate ${!usingBrowsedPath && project.id === selectedProjectId ? "font-medium" : ""}`}>
                         {project.name}
                       </span>
                     </DropdownMenuItem>
                   ))}
+                  {lastBrowsedPath && (
+                    <DropdownMenuItem onClick={() => setSelectedProjectId(undefined)}>
+                      <FolderOpenIcon className="w-4 h-4 mr-2" />
+                      <span className={`truncate ${usingBrowsedPath ? "font-medium" : ""}`}>
+                        {browsedFolderName ?? lastBrowsedPath}
+                      </span>
+                    </DropdownMenuItem>
+                  )}
+                  {(onBrowseFolder || onAddFolder) && <DropdownMenuSeparator />}
+                  {onBrowseFolder && (
+                    <DropdownMenuItem onClick={handleBrowseFolder}>
+                      <FolderOpenIcon className="w-4 h-4 mr-2" />
+                      Browse folder...
+                    </DropdownMenuItem>
+                  )}
                   {onAddFolder && (
-                    <>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem onClick={onAddFolder}>
-                        <FileIcon className="w-4 h-4 mr-2" />
-                        Add folder...
-                      </DropdownMenuItem>
-                    </>
+                    <DropdownMenuItem onClick={onAddFolder}>
+                      <FileIcon className="w-4 h-4 mr-2" />
+                      Add folder...
+                    </DropdownMenuItem>
                   )}
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -586,22 +642,43 @@ export function PanelGrid({
                         ))}
                       </DropdownMenuContent>
                     </DropdownMenu>
-                    {/* Model input */}
-                    <input
-                      type="text"
-                      value={modelInput}
-                      onChange={(e) => setModelInput(e.target.value)}
-                      onBlur={handleModelCommit}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          e.preventDefault();
-                          (e.target as HTMLInputElement).blur();
-                        }
-                      }}
-                      placeholder="model"
-                      spellCheck={false}
-                      className="w-36 px-2 py-1 text-xs font-mono bg-transparent border border-border rounded-md outline-none focus:border-primary/60 placeholder:text-muted-foreground/60"
-                    />
+                    {/* Model dropdown (MaaS registry) */}
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button
+                          className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-card rounded-md transition-colors max-w-[14rem]"
+                          title={savedModel || "Select model"}
+                        >
+                          <span className="truncate">
+                            {currentMaasModel?.displayName ?? savedModel ?? "No model"}
+                          </span>
+                          <ChevronDownIcon className="w-3 h-3 flex-shrink-0" />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="min-w-[220px]">
+                        {maasProvider && maasProvider.models.length > 0 ? (
+                          maasProvider.models.map((m) => (
+                            <DropdownMenuItem
+                              key={m.id}
+                              onClick={() => handleModelSelect(m.modelName)}
+                            >
+                              <div className="flex flex-col min-w-0">
+                                <span className={`truncate ${m.modelName === savedModel ? "font-medium" : ""}`}>
+                                  {m.displayName}
+                                </span>
+                                <span className="text-[10px] font-mono text-muted-foreground truncate">
+                                  {m.modelName}
+                                </span>
+                              </div>
+                            </DropdownMenuItem>
+                          ))
+                        ) : (
+                          <div className="px-2 py-1.5 text-xs text-muted-foreground">
+                            No models — configure in Settings → MaaS Registry
+                          </div>
+                        )}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </div>
                 )}
               </div>

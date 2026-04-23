@@ -46,6 +46,7 @@ function getFeatureFromPath(pathname: string): FeatureType | null {
     "settings": "settings",
     "knowledge": "kb-distill",
     "marketplace": "marketplace",
+    "events": "events",
   };
 
   // Handle settings sub-routes
@@ -53,6 +54,7 @@ function getFeatureFromPath(pathname: string): FeatureType | null {
     const sub = path.split("/")[1];
     if (sub === "env") return "basic-env";
     if (sub === "llm") return "basic-llm";
+    if (sub === "maas") return "basic-maas";
     if (sub === "version") return "basic-version";
     if (sub === "context") return "basic-context";
     return "settings";
@@ -144,6 +146,7 @@ export default function RootLayout() {
       "features": "/features",
       "marketplace": "/marketplace",
       "extensions": "/extensions",
+      "events": "/events",
     };
     const path = routes[feature];
     if (path) {
@@ -160,9 +163,6 @@ export default function RootLayout() {
           canGoForward={false}
           onGoBack={() => navigate(-1)}
           onGoForward={() => navigate(1)}
-          onNavigate={(view) => {
-            if (view.type === "home") navigate("/");
-          }}
           onFeatureClick={handleFeatureClick}
           onShowProfileDialog={() => setShowProfileDialog(true)}
           onShowSettings={() => setShowSettings(true)}

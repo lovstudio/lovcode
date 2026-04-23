@@ -1,5 +1,4 @@
 // View exports - modular page components
-export { Home } from "./Home";
 export { ProjectsView } from "./Projects";
 export { OutputStylesView } from "./OutputStyles";
 export { StatuslineView } from "./Statusline/StatuslineView";

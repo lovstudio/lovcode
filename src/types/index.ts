@@ -1,3 +1,5 @@
+export * from "./maas";
+
 // ============================================================================
 // Feature Types
 // ============================================================================
@@ -8,6 +10,7 @@ export type FeatureType =
   | "features"
   | "basic-env"
   | "basic-llm"
+  | "basic-maas"
   | "basic-version"
   | "basic-context"
   | "settings"
@@ -21,7 +24,8 @@ export type FeatureType =
   | "marketplace"
   | "extensions"
   | "kb-distill"
-  | "kb-reference";
+  | "kb-reference"
+  | "events";
 
 export interface FeatureConfig {
   type: FeatureType;
@@ -250,6 +254,7 @@ export type View =
   | { type: "chat-messages"; projectId: string; projectPath: string; sessionId: string; summary: string | null }
   | { type: "basic-env" }
   | { type: "basic-llm" }
+  | { type: "basic-maas" }
   | { type: "basic-version" }
   | { type: "basic-context" }
   | { type: "settings" }

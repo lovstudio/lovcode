@@ -4,12 +4,13 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   PersonIcon, ChevronLeftIcon, ChevronRightIcon,
   RocketIcon, CounterClockwiseClockIcon, BookmarkIcon, LayersIcon,
+  CalendarIcon,
 } from "@radix-ui/react-icons";
 import { Avatar, AvatarImage, AvatarFallback } from "../ui/avatar";
 import { Popover, PopoverTrigger, PopoverContent } from "../ui/popover";
 import { sidebarCollapsedAtom, profileAtom, workspaceDataAtom, primaryFeatureAtom, featureTabsLayoutAtom } from "@/store";
 import { GlobalFeatureTabs } from "./GlobalFeatureTabs";
-import type { View, FeatureType } from "@/types";
+import type { FeatureType } from "@/types";
 
 interface GlobalHeaderProps {
   currentFeature: FeatureType | null;
@@ -17,7 +18,6 @@ interface GlobalHeaderProps {
   canGoForward: boolean;
   onGoBack: () => void;
   onGoForward: () => void;
-  onNavigate: (view: View) => void;
   onFeatureClick: (feature: FeatureType) => void;
   onShowProfileDialog: () => void;
   onShowSettings: () => void;
@@ -29,7 +29,6 @@ export function GlobalHeader({
   canGoForward,
   onGoBack,
   onGoForward,
-  onNavigate,
   onFeatureClick,
   onShowProfileDialog,
   onShowSettings,
@@ -44,7 +43,7 @@ export function GlobalHeader({
   const showFeatureTabs = !!workspace && featureTabsLayout === "horizontal";
 
   // Main nav features - use primaryFeature for active state (not affected by profile menu clicks)
-  const mainNavFeatures = ["workspace", "chat", "kb-distill", "kb-reference"] as const;
+  const mainNavFeatures = ["workspace", "chat", "kb-distill", "kb-reference", "events"] as const;
   const isMainNavFeature = (f: string | null) => f && (mainNavFeatures.includes(f as typeof mainNavFeatures[number]) || f.startsWith("kb-"));
 
   // Handle main nav click - updates primaryFeature
@@ -88,12 +87,6 @@ export function GlobalHeader({
         {/* Center: menu group */}
         <div className="flex-1 flex items-center justify-center gap-0.5" data-tauri-drag-region>
           <NavButton
-            isActive={primaryFeature === null}
-            onClick={() => { setPrimaryFeature(null); onNavigate({ type: "home" }); }}
-            icon={<img src="/logo.svg" alt="Lovcode" className="w-4 h-4" />}
-            label="Lovcode"
-          />
-          <NavButton
             isActive={primaryFeature === "workspace"}
             onClick={() => handleMainNavClick("workspace")}
             icon={<RocketIcon className="w-4 h-4" />}
@@ -116,6 +109,12 @@ export function GlobalHeader({
             onClick={() => handleMainNavClick("kb-distill")}
             icon={<BookmarkIcon className="w-4 h-4" />}
             label="Knowledge"
+          />
+          <NavButton
+            isActive={primaryFeature === "events"}
+            onClick={() => handleMainNavClick("events")}
+            icon={<CalendarIcon className="w-4 h-4" />}
+            label="Events"
           />
           {showFeatureTabs && (
             <>

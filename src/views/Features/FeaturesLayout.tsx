@@ -5,12 +5,13 @@ import { SidebarLayout, NavSidebar } from "@/components/shared";
 import { TEMPLATE_CATEGORIES } from "@/constants";
 import type { FeatureType, TemplateCategory } from "@/types";
 
-type SidebarKey = TemplateCategory | "basic-env" | "basic-llm" | "basic-version" | "basic-context" | "extensions";
+type SidebarKey = TemplateCategory | "basic-env" | "basic-llm" | "basic-maas" | "basic-version" | "basic-context" | "extensions";
 
 // Map sidebar key to route path
 const KEY_TO_ROUTE: Record<SidebarKey, string> = {
   "basic-env": "/settings/env",
   "basic-llm": "/settings/llm",
+  "basic-maas": "/settings/maas",
   "basic-version": "/settings/version",
   "basic-context": "/settings/context",
   settings: "/settings",
@@ -28,6 +29,7 @@ const KEY_TO_ROUTE: Record<SidebarKey, string> = {
 const FEATURE_TO_KEY: Partial<Record<FeatureType, SidebarKey>> = {
   "basic-env": "basic-env",
   "basic-llm": "basic-llm",
+  "basic-maas": "basic-maas",
   "basic-version": "basic-version",
   "basic-context": "basic-context",
   settings: "settings",
@@ -58,6 +60,7 @@ export function FeaturesLayout({ children, feature, currentFeature, onFeatureCli
       items: [
         { key: "basic-env", label: "Environment" },
         { key: "basic-llm", label: "LLM Provider" },
+        { key: "basic-maas", label: "MaaS Registry" },
         { key: "basic-version", label: "CC Version" },
         { key: "basic-context", label: "Context" },
       ],
@@ -80,6 +83,7 @@ export function FeaturesLayout({ children, feature, currentFeature, onFeatureCli
       const keyToFeature: Record<SidebarKey, FeatureType> = {
         "basic-env": "basic-env",
         "basic-llm": "basic-llm",
+        "basic-maas": "basic-maas",
         "basic-version": "basic-version",
         "basic-context": "basic-context",
         settings: "settings",

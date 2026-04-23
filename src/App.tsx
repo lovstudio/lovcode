@@ -21,7 +21,6 @@ import { AppConfigContext, useAppConfig, type AppConfig } from "./context";
 import { useUrlInit } from "./hooks";
 // Modular views
 import {
-  Home,
   WorkspaceView,
   FeaturesView,
   FeaturesLayout,
@@ -45,6 +44,7 @@ import {
   SettingsView,
   EnvSettingsView,
   LlmProviderView,
+  MaasRegistryView,
   ClaudeVersionView,
   ContextFilesView,
   ProjectList,
@@ -153,6 +153,8 @@ function App() {
         ? "basic-env"
         : view.type === "basic-llm"
         ? "basic-llm"
+        : view.type === "basic-maas"
+        ? "basic-maas"
         : view.type === "basic-version"
         ? "basic-version"
         : view.type === "basic-context"
@@ -195,6 +197,9 @@ function App() {
         break;
       case "basic-llm":
         navigate({ type: "basic-llm" });
+        break;
+      case "basic-maas":
+        navigate({ type: "basic-maas" });
         break;
       case "basic-version":
         navigate({ type: "basic-version" });
@@ -252,7 +257,6 @@ function App() {
           canGoForward={canGoForward}
           onGoBack={goBack}
           onGoForward={goForward}
-          onNavigate={navigate}
           onFeatureClick={handleFeatureClick}
           onShowProfileDialog={() => setShowProfileDialog(true)}
           onShowSettings={() => setShowSettings(true)}
@@ -261,15 +265,6 @@ function App() {
         {/* Vertical Feature Tabs Sidebar */}
         {featureTabsLayout === "vertical" && workspace && <VerticalFeatureTabs />}
         <main className="flex-1 overflow-auto">
-        {view.type === "home" && (
-          <Home
-            onFeatureClick={handleFeatureClick}
-            onProjectClick={(p) => navigate({ type: "chat-sessions", projectId: p.id, projectPath: p.path })}
-            onSessionClick={(s) => navigate({ type: "chat-messages", projectId: s.project_id, projectPath: s.project_path || '', sessionId: s.id, summary: s.summary })}
-            onSearch={() => navigate({ type: "chat-projects" })}
-            onOpenAnnualReport={() => navigate({ type: "annual-report-2025" })}
-          />
-        )}
         {view.type === "annual-report-2025" && (
           <AnnualReport2025 onClose={() => navigate({ type: "home" })} />
         )}
@@ -299,7 +294,7 @@ function App() {
             onBack={() => navigate({ type: "chat-sessions", projectId: view.projectId, projectPath: view.projectPath })}
           />
         )}
-        {(view.type === "basic-env" || view.type === "basic-llm" || view.type === "basic-version" || view.type === "basic-context" ||
+        {(view.type === "basic-env" || view.type === "basic-llm" || view.type === "basic-maas" || view.type === "basic-version" || view.type === "basic-context" ||
           view.type === "settings" || view.type === "commands" || view.type === "command-detail" || view.type === "mcp" ||
           view.type === "skills" || view.type === "hooks" ||
           view.type === "sub-agents" || view.type === "sub-agent-detail" || view.type === "output-styles" ||
@@ -307,6 +302,7 @@ function App() {
           <FeaturesLayout currentFeature={currentFeature} onFeatureClick={handleFeatureClick}>
             {view.type === "basic-env" && <EnvSettingsView />}
             {view.type === "basic-llm" && <LlmProviderView />}
+            {view.type === "basic-maas" && <MaasRegistryView />}
             {view.type === "basic-version" && <ClaudeVersionView />}
             {view.type === "basic-context" && <ContextFilesView />}
             {view.type === "settings" && (

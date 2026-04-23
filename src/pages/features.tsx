@@ -26,6 +26,7 @@ export default function FeaturesPage() {
       "features": "/features",
       "marketplace": "/marketplace",
       "extensions": "/extensions",
+      "events": "/events",
     };
     const path = routes[feature];
     if (path) navigate(path);
