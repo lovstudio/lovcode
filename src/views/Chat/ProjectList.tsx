@@ -1,8 +1,8 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ChevronDownIcon, ChevronRightIcon, DotsHorizontalIcon, ListBulletIcon, GroupIcon, MixIcon, MagnifyingGlassIcon, Cross2Icon } from "@radix-ui/react-icons";
-import { Copy, Upload } from "lucide-react";
+import { Copy, Upload, ChevronUp, ChevronDown } from "lucide-react";
 import { useAtom } from "jotai";
 import {
   allProjectsSortByAtom,
@@ -16,6 +16,7 @@ import { useReadableText } from "./utils";
 import { useInvokeQuery, useQueryClient } from "../../hooks";
 import { CollapsibleContent } from "./CollapsibleContent";
 import { ContentBlockRenderer } from "./ContentBlockRenderer";
+import { HighlightText } from "./HighlightText";
 import { ProjectLogo } from "../Workspace/ProjectLogo";
 import {
   DropdownMenu,
@@ -58,6 +59,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
   const [searchResults, setSearchResults] = useState<Session[] | null>(null);
   const [searching, setSearching] = useState(false);
   const [indexReady, setIndexReady] = useState(false);
+  const detailScrollRef = useRef<HTMLDivElement>(null);
 
   // Default all projects to collapsed on first load
   useEffect(() => {
@@ -346,6 +348,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
                   onDoubleClick={() => onSelectSession(session)}
                   toReadable={toReadable}
                   showProject
+                  highlight={searchQuery}
                 />
               ))
             )
@@ -416,11 +419,13 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
       </div>
 
       {/* Right Panel: Session Detail */}
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 overflow-y-auto" ref={detailScrollRef}>
         {selectedSession ? (
           <SessionDetail
             session={selectedSession}
             onClose={() => setSelectedSession(null)}
+            highlight={searchResults !== null ? searchQuery : undefined}
+            scrollRef={detailScrollRef}
           />
         ) : (
           <div className="flex flex-col items-center justify-center h-full gap-3 text-muted-foreground text-sm">
@@ -451,6 +456,7 @@ function SessionItemButton({
   onDoubleClick,
   toReadable,
   showProject,
+  highlight,
 }: {
   session: Session;
   isSelected: boolean;
@@ -458,7 +464,10 @@ function SessionItemButton({
   onDoubleClick: () => void;
   toReadable: (s: string | null) => string;
   showProject?: boolean;
+  highlight?: string;
 }) {
+  const titleText = session.title || toReadable(session.summary) || "Untitled";
+  const projectName = session.project_path?.split("/").pop() ?? "";
   return (
     <button
       onClick={onClick}
@@ -471,11 +480,11 @@ function SessionItemButton({
     >
       <div className="truncate flex-1 min-w-0">
         <span className="truncate block">
-          {session.title || toReadable(session.summary) || "Untitled"}
+          <HighlightText text={titleText} query={highlight} />
         </span>
         {showProject && session.project_path && (
           <span className="text-[10px] text-muted-foreground/60 truncate block">
-            {session.project_path.split("/").pop()}
+            <HighlightText text={projectName} query={highlight} />
           </span>
         )}
       </div>
@@ -490,7 +499,7 @@ function SessionItemButton({
 // Session Detail (right panel)
 // ============================================================================
 
-function SessionDetail({ session, onClose }: { session: Session; onClose: () => void }) {
+function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Session; onClose: () => void; highlight?: string; scrollRef?: React.RefObject<HTMLDivElement | null> }) {
   const { formatPath } = useAppConfig();
   const toReadable = useReadableText();
   const [messages, setMessages] = useState<Message[]>([]);
@@ -522,6 +531,71 @@ function SessionDetail({ session, onClose }: { session: Session; onClose: () => 
     invoke("copy_to_clipboard", { text: content });
   };
 
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [activeMatch, setActiveMatch] = useState(0);
+  const [matchCount, setMatchCount] = useState(0);
+
+  // Count matches from the actual rendered DOM (source of truth) after every render
+  useEffect(() => {
+    const root = contentRef.current;
+    if (!highlight?.trim() || !root || loading) {
+      setMatchCount(0);
+      return;
+    }
+    const raf = requestAnimationFrame(() => {
+      const root2 = contentRef.current;
+      if (!root2) return;
+      const hits = root2.querySelectorAll("[data-search-hit]");
+      setMatchCount(hits.length);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [highlight, filteredMessages, loading, originalChat]);
+
+  useEffect(() => {
+    setActiveMatch(0);
+  }, [highlight, filteredMessages]);
+
+  useEffect(() => {
+    if (!contentRef.current || matchCount === 0 || loading) return;
+    const raf = requestAnimationFrame(() => {
+      const root = contentRef.current;
+      const scroller = scrollRef?.current;
+      if (!root) return;
+      const hits = root.querySelectorAll<HTMLElement>("[data-search-hit]");
+      if (hits.length === 0) return;
+      const idx = Math.min(activeMatch, hits.length - 1);
+      hits.forEach((el, i) => {
+        if (i === idx) {
+          el.style.backgroundColor = "#CC785C";
+          el.style.color = "#fff";
+          el.style.outline = "2px solid #CC785C";
+        } else {
+          el.style.backgroundColor = "";
+          el.style.color = "";
+          el.style.outline = "";
+        }
+      });
+      const target = hits[idx];
+      if (scroller) {
+        const targetRect = target.getBoundingClientRect();
+        const scrollerRect = scroller.getBoundingClientRect();
+        const delta = targetRect.top - scrollerRect.top - scrollerRect.height / 2 + targetRect.height / 2;
+        scroller.scrollTo({
+          top: scroller.scrollTop + delta,
+          behavior: "smooth",
+        });
+      } else {
+        target.scrollIntoView({ block: "center", behavior: "smooth" });
+      }
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [activeMatch, matchCount, loading, scrollRef]);
+
+  const gotoMatch = (delta: number) => {
+    if (matchCount === 0) return;
+    setActiveMatch((prev) => (prev + delta + matchCount) % matchCount);
+  };
+
   return (
     <div className="pb-6">
       <header className="sticky top-0 z-10 bg-background/95 backdrop-blur border-b border-border px-6 py-4 mb-4 flex items-start justify-between gap-4">
@@ -541,6 +615,29 @@ function SessionDetail({ session, onClose }: { session: Session; onClose: () => 
           </p>
         </div>
         <div className="flex items-center gap-3 shrink-0">
+          {highlight?.trim() && (
+            <div className="flex items-center gap-1 text-xs text-muted-foreground">
+              <span className="tabular-nums">
+                {matchCount === 0 ? "0/0" : `${activeMatch + 1}/${matchCount}`}
+              </span>
+              <button
+                onClick={() => gotoMatch(-1)}
+                disabled={matchCount === 0}
+                className="p-1 rounded hover:bg-card-alt hover:text-ink disabled:opacity-40 disabled:hover:bg-transparent"
+                title="Previous match"
+              >
+                <ChevronUp className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={() => gotoMatch(1)}
+                disabled={matchCount === 0}
+                className="p-1 rounded hover:bg-card-alt hover:text-ink disabled:opacity-40 disabled:hover:bg-transparent"
+                title="Next match"
+              >
+                <ChevronDown className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
           <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
             <input
               type="checkbox"
@@ -573,7 +670,7 @@ function SessionDetail({ session, onClose }: { session: Session; onClose: () => 
         </div>
       </header>
 
-      <div className="px-6">
+      <div className="px-6" ref={contentRef}>
 
 
       {loading ? (
@@ -609,9 +706,9 @@ function SessionDetail({ session, onClose }: { session: Session; onClose: () => 
                   )}
                 </p>
                 {msg.content_blocks && !originalChat ? (
-                  <ContentBlockRenderer blocks={msg.content_blocks} markdown={markdownPreview} />
+                  <ContentBlockRenderer blocks={msg.content_blocks} markdown={markdownPreview} highlight={highlight} />
                 ) : (
-                  <CollapsibleContent content={displayContent} markdown={markdownPreview} />
+                  <CollapsibleContent content={displayContent} markdown={markdownPreview} highlight={highlight} />
                 )}
               </div>
             );

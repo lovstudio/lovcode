@@ -5,6 +5,7 @@ import type { ContentBlock } from "../../types";
 interface ContentBlockRendererProps {
   blocks: ContentBlock[];
   markdown: boolean;
+  highlight?: string;
 }
 
 const TOOL_COLORS: Record<string, string> = {
@@ -79,13 +80,13 @@ function ThinkingBlock({ thinking }: { thinking: string }) {
   );
 }
 
-export function ContentBlockRenderer({ blocks, markdown }: ContentBlockRendererProps) {
+export function ContentBlockRenderer({ blocks, markdown, highlight }: ContentBlockRendererProps) {
   return (
     <div className="space-y-1">
       {blocks.map((block, i) => {
         switch (block.type) {
           case "text":
-            return <CollapsibleContent key={i} content={block.text} markdown={markdown} />;
+            return <CollapsibleContent key={i} content={block.text} markdown={markdown} highlight={highlight} />;
           case "tool_use":
             return <ToolUseBadge key={i} name={block.name} summary={block.summary} />;
           case "tool_result":
