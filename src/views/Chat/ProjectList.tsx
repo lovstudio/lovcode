@@ -2,8 +2,8 @@ import { useState, useMemo, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ChevronDownIcon, ChevronRightIcon, DotsHorizontalIcon, ListBulletIcon, GroupIcon, MixIcon, MagnifyingGlassIcon, Cross2Icon } from "@radix-ui/react-icons";
-import { Copy, Upload, ChevronUp, ChevronDown, Pin, PinOff, RefreshCw } from "lucide-react";
+import { ChevronDownIcon, ChevronRightIcon, DotsHorizontalIcon, ListBulletIcon, GroupIcon, MagnifyingGlassIcon, Cross2Icon } from "@radix-ui/react-icons";
+import { Copy, Upload, ChevronUp, ChevronDown, Pin, RefreshCw } from "lucide-react";
 import { useAtom } from "jotai";
 import {
   allProjectsSortByAtom,
@@ -12,6 +12,10 @@ import {
   markdownPreviewAtom,
   userPromptsOnlyAtom,
   pinnedSessionIdsAtom,
+  unpinnedAppIdsAtom,
+  pinnedCollapsedAtom,
+  recentCollapsedAtom,
+  importCollapsedAtom,
 } from "../../store";
 import { useAppConfig } from "../../context";
 import { useReadableText } from "./utils";
@@ -20,6 +24,7 @@ import { CollapsibleContent } from "./CollapsibleContent";
 import { ContentBlockRenderer } from "./ContentBlockRenderer";
 import { HighlightText } from "./HighlightText";
 import { ProjectLogo } from "../Workspace/ProjectLogo";
+import { ActivityCard } from "../../components/home";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -55,13 +60,16 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
   const [sortBy, setSortBy] = useAtom(allProjectsSortByAtom);
   const [hideEmptySessions, setHideEmptySessions] = useAtom(hideEmptySessionsAllAtom);
   const [pinnedIds, setPinnedIds] = useAtom(pinnedSessionIdsAtom);
-  const togglePin = (id: string) => {
-    setPinnedIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
-  };
+  const [unpinnedAppIds, setUnpinnedAppIds] = useAtom(unpinnedAppIdsAtom);
+  const [pinnedCollapsed, setPinnedCollapsed] = useAtom(pinnedCollapsedAtom);
+  const [recentCollapsed, setRecentCollapsed] = useAtom(recentCollapsedAtom);
+  const [importCollapsed, setImportCollapsed] = useAtom(importCollapsedAtom);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string> | null>(null);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [grouped, setGrouped] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [searchResults, setSearchResults] = useState<Session[] | null>(null);
   const [searching, setSearching] = useState(false);
   const [indexReady, setIndexReady] = useState(false);
@@ -73,6 +81,26 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
       setCollapsedGroups(new Set(projects.map((p) => p.id)));
     }
   }, [projects, collapsedGroups]);
+
+  useEffect(() => {
+    if (searchOpen) {
+      requestAnimationFrame(() => searchInputRef.current?.focus());
+    } else {
+      setSearchQuery("");
+    }
+  }, [searchOpen]);
+
+  // Global ⌘K / Ctrl+K to open search modal
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setSearchOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // Build search index on mount
   useEffect(() => {
@@ -127,6 +155,8 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
       queryClient.invalidateQueries({ queryKey: ["projects"] });
       queryClient.invalidateQueries({ queryKey: ["sessions"] });
       console.log("[web-sync]", result);
+      // Re-pull starred ids now that the web-starred cache file is fresh
+      syncPinsFromApp();
     } catch (e) {
       console.warn("[web-sync] failed:", e);
       setWebSyncError(String(e));
@@ -135,13 +165,18 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
       setWebSyncProgress(null);
     }
   };
+  // Lazy sync: only fire when the user actually opens the Web tab. This avoids
+  // triggering a macOS Keychain prompt for users who never look at web data.
+  // Sync runs at most once per app launch; user can re-trigger via the
+  // dropdown menu's "Sync from claude.ai (live)" item.
   const webSyncedRef = useRef(false);
   useEffect(() => {
     if (webSyncedRef.current) return;
+    if (dataSource !== "web") return;
     webSyncedRef.current = true;
     syncWebFromApp();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [dataSource]);
 
   // Sync pinned state from Claude desktop app's "starredIds".
   //
@@ -184,13 +219,48 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allSessions]);
 
-  // Effective pin set for display = user pins ∪ app starred ids.
-  // Re-computed on every sync; never persisted as a whole.
+  // Effective pin set for display = (user pins ∪ app starred) − local-overrides.
+  // appStarredIds is in-memory mirror from Claude app/web sync.
+  // unpinnedAppIds is the user's local "I don't want this app-starred session
+  // pinned in lovcode" override — lets togglePin work on Claude-starred items
+  // without writing back to the upstream app.
+  const appStarredSet = useMemo(() => new Set(appStarredIds), [appStarredIds]);
+  const unpinnedAppSet = useMemo(() => new Set(unpinnedAppIds), [unpinnedAppIds]);
   const effectivePinnedSet = useMemo(() => {
     const s = new Set<string>(pinnedIds);
-    for (const id of appStarredIds) s.add(id);
+    for (const id of appStarredIds) {
+      if (!unpinnedAppSet.has(id)) s.add(id);
+    }
     return s;
-  }, [pinnedIds, appStarredIds]);
+  }, [pinnedIds, appStarredIds, unpinnedAppSet]);
+
+  // Toggle handles three cases:
+  //  1) user-pinned (in pinnedIds)         -> remove from pinnedIds
+  //  2) app-starred & not overridden       -> add to unpinnedAppIds (local hide)
+  //  3) app-starred & already overridden   -> remove from unpinnedAppIds (re-show)
+  //  4) neither                            -> add to pinnedIds
+  const togglePin = (id: string) => {
+    if (pinnedIds.includes(id)) {
+      setPinnedIds((prev) => prev.filter((x) => x !== id));
+    } else if (appStarredSet.has(id) && !unpinnedAppSet.has(id)) {
+      setUnpinnedAppIds((prev) => prev.includes(id) ? prev : [...prev, id]);
+    } else if (unpinnedAppSet.has(id)) {
+      setUnpinnedAppIds((prev) => prev.filter((x) => x !== id));
+    } else {
+      setPinnedIds((prev) => [...prev, id]);
+    }
+  };
+
+  // Garbage-collect unpinnedAppIds: if Claude app no longer stars an id,
+  // we don't need to keep an override for it.
+  useEffect(() => {
+    if (appStarredIds.length === 0) return;
+    setUnpinnedAppIds((prev) => {
+      const next = prev.filter((id) => appStarredSet.has(id));
+      return next.length === prev.length ? prev : next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appStarredIds]);
 
   // Full-text search across session summaries/titles + content via search_chats
   useEffect(() => {
@@ -357,15 +427,6 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
     if (selected) doImport(selected);
   };
 
-  const handleImportDir = async () => {
-    const selected = await open({
-      directory: true,
-      multiple: false,
-      title: "Select claude.ai data export folder",
-    });
-    if (selected) doImport(selected);
-  };
-
   const toggleCollapse = (id: string) => {
     setCollapsedGroups((prev) => {
       const next = new Set(prev ?? []);
@@ -388,7 +449,17 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
       {/* Left Panel: Project Tree */}
       <div className="w-80 shrink-0 border-r border-border overflow-y-auto">
         <div className="px-4 py-4">
-          <h2 className="font-serif text-lg font-semibold text-ink mb-1">Chat History</h2>
+          <div className="flex items-center justify-between mb-1">
+            <h2 className="font-serif text-lg font-semibold text-ink">Chat History</h2>
+            <button
+              onClick={() => setSearchOpen(true)}
+              className="flex items-center gap-1.5 p-1.5 rounded-md text-muted-foreground hover:text-ink hover:bg-card-alt transition-colors"
+              title="Search conversations (⌘K)"
+            >
+              <MagnifyingGlassIcon className="w-3.5 h-3.5" />
+              <kbd className="text-[10px] font-mono px-1 rounded border border-border bg-card-alt/60 text-muted-foreground/80">⌘K</kbd>
+            </button>
+          </div>
           <p className="text-xs text-muted-foreground mb-3">
             {sortedProjects.length} projects · {visibleSessions.length} sessions
           </p>
@@ -437,97 +508,6 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
             </div>
           )}
 
-          {/* Search */}
-          <div className="relative mb-2">
-            <MagnifyingGlassIcon className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder={indexReady ? "Search conversations..." : "Building search index..."}
-              className="w-full pl-8 pr-3 py-1.5 rounded-lg text-xs bg-card border border-border text-ink placeholder:text-muted-foreground focus:outline-none focus:border-primary"
-            />
-            {searching && (
-              <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground text-xs">...</span>
-            )}
-          </div>
-
-          {/* Controls */}
-          <div className="flex items-center gap-1">
-            {/* Sort dropdown */}
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs text-muted-foreground hover:text-ink hover:bg-card-alt transition-colors">
-                  <MixIcon className="w-3.5 h-3.5" />
-                  {sortBy === "name" ? "Name" : "Recent"}
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="min-w-[120px]">
-                <DropdownMenuLabel className="text-xs">Sort by</DropdownMenuLabel>
-                <DropdownMenuRadioGroup value={sortBy} onValueChange={(v) => setSortBy(v as typeof sortBy)}>
-                  <DropdownMenuRadioItem value="recent">Recent</DropdownMenuRadioItem>
-                  <DropdownMenuRadioItem value="name">Name</DropdownMenuRadioItem>
-                </DropdownMenuRadioGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
-
-            <div className="flex-1" />
-
-            {/* Sync pins from Claude app */}
-            <button
-              onClick={syncPinsFromApp}
-              className="p-1.5 rounded-md transition-colors text-muted-foreground hover:text-ink hover:bg-card-alt"
-              title="Sync pins from Claude app (starred sessions)"
-            >
-              <Pin className="w-3.5 h-3.5" />
-            </button>
-
-            {/* Grouped/Flat toggle */}
-            <button
-              onClick={() => setGrouped(!grouped)}
-              className={`p-1.5 rounded-md transition-colors ${grouped ? "bg-card-alt text-ink" : "text-muted-foreground hover:text-ink"}`}
-              title={grouped ? "Flat view" : "Grouped view"}
-            >
-              {grouped ? <GroupIcon className="w-3.5 h-3.5" /> : <ListBulletIcon className="w-3.5 h-3.5" />}
-            </button>
-
-            {/* Hide empty toggle */}
-            <button
-              onClick={() => setHideEmptySessions(!hideEmptySessions)}
-              className={`p-1.5 rounded-md transition-colors ${hideEmptySessions ? "bg-card-alt text-ink" : "text-muted-foreground hover:text-ink"}`}
-              title={hideEmptySessions ? "Show all sessions" : "Hide empty sessions"}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                {hideEmptySessions ? (
-                  <><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><path d="m2 2 20 20"/></>
-                ) : (
-                  <><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></>
-                )}
-              </svg>
-            </button>
-
-            {/* Import claude.ai data */}
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button
-                  disabled={importing}
-                  className="p-1.5 rounded-md transition-colors text-muted-foreground hover:text-ink hover:bg-card-alt disabled:opacity-50"
-                  title="Import claude.ai data export"
-                >
-                  <Upload className="w-3.5 h-3.5" />
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="min-w-[200px]">
-                <DropdownMenuItem onClick={syncWebFromApp} disabled={webSyncing} className="gap-2">
-                  <RefreshCw className={`w-3.5 h-3.5 ${webSyncing ? "animate-spin" : ""}`} />
-                  {webSyncing ? "Syncing..." : "Sync from claude.ai (live)"}
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={handleImportZip}>Import .zip</DropdownMenuItem>
-                <DropdownMenuItem onClick={handleImportDir}>Import folder</DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
         </div>
 
         {/* Session List */}
@@ -535,32 +515,36 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
           {/* Pinned section — independent of grouped/flat, hidden during search */}
           {searchResults === null && pinnedSessions.length > 0 && (
             <div className="mb-1">
-              <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] uppercase tracking-wide text-muted-foreground/70">
-                <Pin className="w-3 h-3 fill-current text-primary/60" />
-                <span>Pinned</span>
-                <span className="ml-auto">{pinnedSessions.length}</span>
-              </div>
-              <div className="space-y-0.5">
-                {pinnedSessions.map((session) => (
-                  <SessionItemButton
-                    key={`pinned-${session.id}`}
-                    session={session}
-                    isSelected={selectedSession?.id === session.id}
-                    onClick={() => setSelectedSession(prev => prev?.id === session.id ? null : session)}
-                    onDoubleClick={() => onSelectSession(session)}
-                    toReadable={toReadable}
-                    showProject
-                    isPinned
-                    onTogglePin={() => togglePin(session.id)}
-                  />
-                ))}
-              </div>
+              <SectionHeader
+                icon={<Pin className="w-3 h-3 fill-current text-primary/60" />}
+                label="Pinned"
+                count={pinnedSessions.length}
+                collapsed={pinnedCollapsed}
+                onToggle={() => setPinnedCollapsed(!pinnedCollapsed)}
+              />
+              {!pinnedCollapsed && (
+                <div className="space-y-0.5">
+                  {pinnedSessions.map((session) => (
+                    <SessionItemButton
+                      key={`pinned-${session.id}`}
+                      session={session}
+                      isSelected={selectedSession?.id === session.id}
+                      onClick={() => setSelectedSession(prev => prev?.id === session.id ? null : session)}
+                      onDoubleClick={() => onSelectSession(session)}
+                      toReadable={toReadable}
+                      showProject
+                      isPinned
+                      onTogglePin={() => togglePin(session.id)}
+                    />
+                  ))}
+                </div>
+              )}
               <div className="mx-2 my-1.5 border-t border-border/60" />
             </div>
           )}
 
           {searchResults !== null ? (
-            // Search results (flat)
+            // Search results (flat) — Pinned/Recent grouping suppressed during search
             searchResults.length === 0 ? (
               <div className="text-xs text-muted-foreground px-2 py-4 text-center">No results</div>
             ) : (
@@ -579,7 +563,57 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
                 />
               ))
             )
-          ) : grouped ? (
+          ) : (
+            // Recent section header (wraps grouped or flat list)
+            <>
+              <SectionHeader
+                icon={<ListBulletIcon className="w-3 h-3" />}
+                label="Recent"
+                count={grouped ? sortedProjects.length : flatSessions.length}
+                collapsed={recentCollapsed}
+                onToggle={() => setRecentCollapsed(!recentCollapsed)}
+                rightSlot={
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <button
+                        onClick={(e) => e.stopPropagation()}
+                        className="p-0.5 rounded hover:text-ink hover:bg-card-alt transition-colors opacity-0 group-hover:opacity-100"
+                        title="Recent options"
+                      >
+                        <DotsHorizontalIcon className="w-3 h-3" />
+                      </button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="min-w-[200px]">
+                      <DropdownMenuLabel className="text-xs">Sort by</DropdownMenuLabel>
+                      <DropdownMenuRadioGroup value={sortBy} onValueChange={(v) => setSortBy(v as typeof sortBy)}>
+                        <DropdownMenuRadioItem value="recent">Recent</DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem value="name">Name</DropdownMenuRadioItem>
+                      </DropdownMenuRadioGroup>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem onClick={() => setGrouped(!grouped)} className="gap-2">
+                        {grouped ? <ListBulletIcon className="w-3.5 h-3.5" /> : <GroupIcon className="w-3.5 h-3.5" />}
+                        {grouped ? "Flat view" : "Grouped view"}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => setHideEmptySessions(!hideEmptySessions)} className="gap-2">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          {hideEmptySessions ? (
+                            <><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><path d="m2 2 20 20"/></>
+                          ) : (
+                            <><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></>
+                          )}
+                        </svg>
+                        {hideEmptySessions ? "Show empty sessions" : "Hide empty sessions"}
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem onClick={syncPinsFromApp} className="gap-2">
+                        <Pin className="w-3.5 h-3.5" />
+                        Sync pins from Claude app
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                }
+              />
+              {!recentCollapsed && (grouped ? (
             // Grouped by project
             sortedProjects.length === 0 ? (
               <div className="text-xs text-muted-foreground px-2 py-6 text-center">
@@ -598,21 +632,21 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
                     onDoubleClick={() => onSelectProject(project)}
                     onClick={() => toggleCollapse(project.id)}
                   >
-                    <button className="p-0.5 text-muted-foreground">
-                      {isCollapsed ? (
-                        <ChevronRightIcon className="w-3.5 h-3.5" />
-                      ) : (
-                        <ChevronDownIcon className="w-3.5 h-3.5" />
-                      )}
-                    </button>
                     <ProjectLogo projectPath={project.path} size="sm" />
                     <span className="text-sm font-medium text-ink truncate flex-1" title={project.path}>
                       {projectName}
                     </span>
                     <span className="text-xs text-muted-foreground">{sessions.length}</span>
+                    <span className="p-0.5 text-muted-foreground">
+                      {isCollapsed ? (
+                        <ChevronRightIcon className="w-3.5 h-3.5" />
+                      ) : (
+                        <ChevronDownIcon className="w-3.5 h-3.5" />
+                      )}
+                    </span>
                   </div>
                   {!isCollapsed && (
-                    <div className="ml-5 mt-0.5 space-y-0.5">
+                    <div className="mt-0.5 space-y-0.5">
                       {sessions.length === 0 ? (
                         <div className="text-xs text-muted-foreground px-2 py-1">No sessions</div>
                       ) : (
@@ -653,6 +687,47 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
                 onTogglePin={() => togglePin(session.id)}
               />
             ))
+          ))}
+            </>
+          )}
+
+          {/* Web tab — Import group at the end */}
+          {searchResults === null && dataSource === "web" && (
+            <div className="mb-1">
+              <SectionHeader
+                icon={<Upload className="w-3 h-3" />}
+                label="Import"
+                count={2}
+                collapsed={importCollapsed}
+                onToggle={() => setImportCollapsed(!importCollapsed)}
+              />
+              {!importCollapsed && (
+                <div className="space-y-0.5">
+                  <button
+                    type="button"
+                    onClick={syncWebFromApp}
+                    disabled={webSyncing}
+                    className="w-full flex items-center gap-1.5 px-2 py-1 rounded text-xs text-muted-foreground hover:text-ink hover:bg-card-alt transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Decrypt local Claude desktop app cookies and pull conversations from claude.ai API"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 shrink-0 ${webSyncing ? "animate-spin" : ""}`} />
+                    <span className="truncate flex-1 text-left">
+                      {webSyncing ? "Syncing from local cookies..." : "Sync from local database"}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleImportZip}
+                    disabled={importing}
+                    className="w-full flex items-center gap-1.5 px-2 py-1 rounded text-xs text-muted-foreground hover:text-ink hover:bg-card-alt transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Import a claude.ai data export .zip"
+                  >
+                    <Upload className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate flex-1 text-left">Import from .zip</span>
+                  </button>
+                </div>
+              )}
+            </div>
           )}
         </div>
       </div>
@@ -667,19 +742,208 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
             scrollRef={detailScrollRef}
           />
         ) : (
-          <div className="flex flex-col items-center justify-center h-full gap-3 text-muted-foreground text-sm">
+          <div className="flex flex-col items-center justify-center h-full px-8 gap-4 text-muted-foreground text-sm">
             <span>Select a session to preview</span>
-            <button
-              onClick={handleImportZip}
-              disabled={importing}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs border border-border hover:bg-card-alt transition-colors disabled:opacity-50"
-            >
-              <Upload className="w-3.5 h-3.5" />
-              {importing ? "Importing..." : "Import claude.ai data (.zip)"}
-            </button>
+            <div className="w-full max-w-2xl">
+              <ActivityCard />
+            </div>
           </div>
         )}
       </div>
+
+      {/* Algolia-style search modal */}
+      {searchOpen && (
+        <SearchModal
+          query={searchQuery}
+          onQueryChange={setSearchQuery}
+          results={searchResults ?? []}
+          searching={searching}
+          indexReady={indexReady}
+          inputRef={searchInputRef}
+          toReadable={toReadable}
+          onSelect={(s) => {
+            setSelectedSession(s);
+            setSearchOpen(false);
+          }}
+          onClose={() => setSearchOpen(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Algolia-style search modal
+// ============================================================================
+
+function SearchModal({
+  query,
+  onQueryChange,
+  results,
+  searching,
+  indexReady,
+  inputRef,
+  toReadable,
+  onSelect,
+  onClose,
+}: {
+  query: string;
+  onQueryChange: (v: string) => void;
+  results: Session[];
+  searching: boolean;
+  indexReady: boolean;
+  inputRef: React.RefObject<HTMLInputElement | null>;
+  toReadable: (s: string | null) => string;
+  onSelect: (s: Session) => void;
+  onClose: () => void;
+}) {
+  const [activeIdx, setActiveIdx] = useState(0);
+
+  useEffect(() => { setActiveIdx(0); }, [query, results.length]);
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape") { e.preventDefault(); onClose(); return; }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setActiveIdx((i) => Math.min(i + 1, Math.max(0, results.length - 1)));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActiveIdx((i) => Math.max(i - 1, 0));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const s = results[activeIdx];
+      if (s) onSelect(s);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center pt-24 px-4 bg-black/40 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-2xl bg-card border border-border rounded-2xl shadow-2xl overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={onKeyDown}
+      >
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
+          <MagnifyingGlassIcon className="w-4 h-4 text-muted-foreground shrink-0" />
+          <input
+            ref={inputRef}
+            type="text"
+            value={query}
+            onChange={(e) => onQueryChange(e.target.value)}
+            placeholder={indexReady ? "Search conversations..." : "Building search index..."}
+            className="flex-1 bg-transparent text-sm text-ink placeholder:text-muted-foreground focus:outline-none"
+          />
+          {searching && <span className="text-xs text-muted-foreground">...</span>}
+          <kbd className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-border bg-card-alt text-muted-foreground">ESC</kbd>
+        </div>
+
+        <div className="max-h-[60vh] overflow-y-auto">
+          {!query.trim() ? (
+            <div className="px-4 py-8 text-center text-sm text-muted-foreground">
+              Type to search across all conversations
+            </div>
+          ) : results.length === 0 && !searching ? (
+            <div className="px-4 py-8 text-center text-sm text-muted-foreground">No results</div>
+          ) : (
+            <div className="py-1">
+              {results.map((s, i) => {
+                const title = s.title || toReadable(s.summary) || "Untitled";
+                const projectName = s.project_path?.split("/").pop() ?? "";
+                const isActive = i === activeIdx;
+                return (
+                  <button
+                    key={s.id}
+                    onClick={() => onSelect(s)}
+                    onMouseEnter={() => setActiveIdx(i)}
+                    className={`w-full text-left flex items-center gap-2 px-4 py-2 text-sm transition-colors ${
+                      isActive ? "bg-primary/10 text-ink" : "text-muted-foreground hover:bg-card-alt"
+                    }`}
+                  >
+                    <span className="shrink-0 inline-block w-1.5 h-1.5 rounded-full border border-current opacity-50" />
+                    <div className="truncate flex-1 min-w-0">
+                      <div className="truncate">
+                        <HighlightText text={title} query={query} />
+                      </div>
+                      {projectName && (
+                        <div className="text-[11px] text-muted-foreground/70 truncate">
+                          <HighlightText text={projectName} query={query} />
+                        </div>
+                      )}
+                    </div>
+                    <span className="text-[10px] text-muted-foreground tabular-nums shrink-0">
+                      {s.message_count}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center gap-3 px-4 py-2 border-t border-border text-[10px] text-muted-foreground/80">
+          <span className="flex items-center gap-1">
+            <kbd className="font-mono px-1 rounded border border-border bg-card-alt">↑</kbd>
+            <kbd className="font-mono px-1 rounded border border-border bg-card-alt">↓</kbd>
+            navigate
+          </span>
+          <span className="flex items-center gap-1">
+            <kbd className="font-mono px-1 rounded border border-border bg-card-alt">↵</kbd>
+            open
+          </span>
+          <span className="flex items-center gap-1">
+            <kbd className="font-mono px-1 rounded border border-border bg-card-alt">esc</kbd>
+            close
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// Section Header (Pinned / Recent / Import — DRY)
+// ============================================================================
+
+function SectionHeader({
+  icon,
+  label,
+  count,
+  collapsed,
+  onToggle,
+  rightSlot,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  count?: number;
+  collapsed?: boolean;
+  onToggle?: () => void;
+  rightSlot?: React.ReactNode;
+}) {
+  const collapsible = onToggle !== undefined && collapsed !== undefined;
+  return (
+    <div className="group flex items-center gap-1.5 px-2 py-1 text-xs font-medium text-muted-foreground/80">
+      <button
+        type="button"
+        onClick={onToggle}
+        disabled={!collapsible}
+        className="flex items-center gap-1.5 flex-1 hover:text-ink transition-colors min-w-0 disabled:cursor-default disabled:hover:text-muted-foreground/80"
+      >
+        {icon}
+        <span>{label}</span>
+        {count !== undefined && (
+          <span className="text-muted-foreground/60 font-normal">{count}</span>
+        )}
+        {collapsible && (collapsed ? (
+          <ChevronRightIcon className="w-3 h-3" />
+        ) : (
+          <ChevronDownIcon className="w-3 h-3" />
+        ))}
+        <span className="ml-auto" />
+      </button>
+      {rightSlot}
     </div>
   );
 }
@@ -719,21 +983,16 @@ function SessionItemButton({
         isSelected
           ? "bg-primary/10 text-ink"
           : "text-muted-foreground hover:text-ink hover:bg-card-alt"
-      } ${isPinned ? "before:content-[''] before:absolute before:left-0 before:top-1 before:bottom-1 before:w-0.5 before:rounded-full before:bg-primary/70" : ""}`}
+      }`}
     >
-      {onTogglePin && (
-        <button
-          onClick={(e) => { e.stopPropagation(); onTogglePin(); }}
-          className={`p-0.5 rounded shrink-0 transition-opacity ${
-            isPinned
-              ? "text-primary opacity-100"
-              : "text-muted-foreground/50 opacity-0 group-hover:opacity-100 hover:text-ink"
-          }`}
-          title={isPinned ? "Unpin" : "Pin to top"}
-        >
-          {isPinned ? <Pin className="w-3 h-3 fill-current" /> : <PinOff className="w-3 h-3" />}
-        </button>
-      )}
+      <span
+        className={`shrink-0 inline-block w-1.5 h-1.5 rounded-full border ${
+          isPinned
+            ? "bg-primary border-primary"
+            : "border-current opacity-50"
+        }`}
+        aria-hidden
+      />
       <div className="truncate flex-1 min-w-0">
         <span className="truncate block">
           <HighlightText text={titleText} query={highlight} />
@@ -745,12 +1004,29 @@ function SessionItemButton({
         )}
       </div>
       <div className="flex items-center gap-1 shrink-0">
-        {session.source === "app" && (
-          <span className="w-1.5 h-1.5 rounded-full bg-primary/60 shrink-0" title="Opened via Claude app" />
-        )}
-        <span className="text-[10px] text-muted-foreground">
+        <span className="text-[10px] text-muted-foreground tabular-nums group-hover:hidden">
           {session.message_count}
         </span>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild onClick={(e) => e.stopPropagation()}>
+            <button
+              className="p-0.5 rounded text-muted-foreground/60 hover:text-ink hover:bg-card-alt opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
+              title="Actions"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <DotsHorizontalIcon className="w-3.5 h-3.5" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-48" onClick={(e) => e.stopPropagation()}>
+            <SessionDropdownMenuItems
+              projectId={session.project_id}
+              sessionId={session.id}
+              projectPath={session.project_path ?? undefined}
+              isPinnedOverride={isPinned}
+              onTogglePinOverride={onTogglePin}
+            />
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
     </div>
   );

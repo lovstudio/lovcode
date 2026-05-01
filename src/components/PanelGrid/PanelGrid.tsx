@@ -10,9 +10,9 @@ import type { LayoutNode } from "../../views/Workspace/types";
 import { TERMINAL_OPTIONS, type ProjectOption } from "../ui/new-terminal-button";
 import { SlashCommandMenu, type CommandItem } from "../ui/slash-command-menu";
 import { useInvokeQuery, useQueryClient } from "../../hooks";
-import { ActivityHeatmap } from "../home";
+import { ActivityCard } from "../home";
 import { LLM_PROVIDER_PRESETS } from "../../constants";
-import type { LocalCommand, CodexCommand, Project, Session, ClaudeSettings, MaasProvider } from "../../types";
+import type { LocalCommand, CodexCommand, ClaudeSettings, MaasProvider } from "../../types";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -214,16 +214,6 @@ export function PanelGrid({
     ["codexCommands"],
     "list_codex_commands"
   );
-
-  // Fetch activity data for the heatmap shown in the empty state
-  const { data: activityProjects = [] } = useInvokeQuery<Project[]>(["projects"], "list_projects");
-  const { data: activitySessions = [] } = useInvokeQuery<Session[]>(["sessions"], "list_all_sessions");
-  const { data: activityStats } = useInvokeQuery<{
-    daily: Record<string, number>;
-    hourly: Record<string, number>;
-    detailed: Record<string, number>;
-  }>(["activityStats"], "get_activity_stats");
-  const totalMessages = activitySessions.reduce((sum, s) => sum + s.message_count, 0);
 
   // Claude settings -> active provider + model (for the prompt-box dropdown)
   const { data: claudeSettings } = useInvokeQuery<ClaudeSettings>(["settings"], "get_settings");
@@ -435,25 +425,7 @@ export function PanelGrid({
           ) : null}
 
           {/* Activity heatmap + stats */}
-          {activityStats && (
-            <div className="w-full shrink-0 bg-card/50 rounded-2xl p-3 border border-border/40 overflow-hidden">
-              <ActivityHeatmap
-                daily={activityStats.daily}
-                detailed={activityStats.detailed}
-              />
-              <div className="flex items-center gap-6 mt-2 pt-2 border-t border-border/40 text-xs text-muted-foreground">
-                <span>
-                  <strong className="text-foreground font-serif">{activityProjects.length}</strong> workspaces
-                </span>
-                <span>
-                  <strong className="text-foreground font-serif">{activitySessions.length}</strong> sessions
-                </span>
-                <span>
-                  <strong className="text-foreground font-serif">{totalMessages}</strong> messages
-                </span>
-              </div>
-            </div>
-          )}
+          <ActivityCard />
 
 
           {/* Super prompt box - separated terminal-style input + controls */}

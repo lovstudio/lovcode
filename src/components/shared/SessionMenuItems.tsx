@@ -28,6 +28,11 @@ export interface SessionMenuConfig {
   /** Archive this session and every session after it in the visible list. Count is used for the label. */
   onArchiveAllAfter?: () => void;
   archiveAfterCount?: number;
+  /** Pin override: when supplied, takes precedence over the local useSessionPin atom.
+   * Use this to integrate with the effective pin set (which can include external
+   * sources like Claude app starredIds). */
+  isPinnedOverride?: boolean;
+  onTogglePinOverride?: () => void;
 }
 
 // Shared handlers
@@ -87,11 +92,15 @@ export function SessionDropdownMenuItems({
   onResume,
   onArchiveAllAfter,
   archiveAfterCount,
+  isPinnedOverride,
+  onTogglePinOverride,
 }: SessionMenuConfig) {
   const { handleReveal, handleOpenInEditor, handleCopyPath, handleCopySessionId, handleCopyResumeCommand } =
     useSessionMenuHandlers(projectId, sessionId);
   const { isArchived, toggleArchived } = useSessionArchive(sessionId);
-  const { isPinned, togglePinned } = useSessionPin(sessionId);
+  const { isPinned: localIsPinned, togglePinned: localTogglePinned } = useSessionPin(sessionId);
+  const isPinned = isPinnedOverride ?? localIsPinned;
+  const togglePinned = onTogglePinOverride ?? localTogglePinned;
 
   return (
     <>
@@ -180,11 +189,15 @@ export function SessionContextMenuItems({
   onResume,
   onArchiveAllAfter,
   archiveAfterCount,
+  isPinnedOverride,
+  onTogglePinOverride,
 }: SessionMenuConfig) {
   const { handleReveal, handleOpenInEditor, handleCopyPath, handleCopySessionId, handleCopyResumeCommand } =
     useSessionMenuHandlers(projectId, sessionId);
   const { isArchived, toggleArchived } = useSessionArchive(sessionId);
-  const { isPinned, togglePinned } = useSessionPin(sessionId);
+  const { isPinned: localIsPinned, togglePinned: localTogglePinned } = useSessionPin(sessionId);
+  const isPinned = isPinnedOverride ?? localIsPinned;
+  const togglePinned = onTogglePinOverride ?? localTogglePinned;
 
   return (
     <>

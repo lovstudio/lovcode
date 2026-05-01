@@ -16,6 +16,10 @@ export {
   sidebarViewModeAtom, type SidebarViewMode,
   archivedSessionIdsAtom, showArchivedSessionsAtom,
   pinnedSessionIdsAtom,
+  unpinnedAppIdsAtom,
+  pinnedCollapsedAtom,
+  recentCollapsedAtom,
+  importCollapsedAtom,
 } from "./atoms/chat";
 
 // Settings atoms

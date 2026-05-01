@@ -1414,9 +1414,21 @@ async fn get_app_starred_session_ids() -> Result<Vec<String>, String> {
             }
         }
 
-        let resolved: Vec<String> = app_ids.into_iter()
+        let mut resolved: Vec<String> = app_ids.into_iter()
             .filter_map(|aid| id_to_cli.get(&aid).cloned())
             .collect();
+
+        // Also include web-starred conversation uuids cached by the latest
+        // sync_claude_web_conversations run. These are claude.ai web pins
+        // (separate from Code-tab starredIds) — we union them here so the
+        // frontend gets a single source of "what's app-starred".
+        let web_cache = get_lovstudio_dir().join("claude-web-starred.json");
+        if let Ok(content) = fs::read_to_string(&web_cache) {
+            if let Ok(arr) = serde_json::from_str::<Vec<String>>(&content) {
+                for uuid in arr { resolved.push(uuid); }
+            }
+        }
+
         Ok(resolved)
     })
     .await
@@ -8476,35 +8488,16 @@ async fn sync_claude_web_conversations(app_handle: tauri::AppHandle) -> Result<W
         .map_err(|e| format!("parse conversation list: {}", e))?;
     eprintln!("[web-sync] got {} conversations from API", conv_list.len());
 
-    // PROBE: dump the first conversation's detail to /tmp so we can inspect
-    // the API schema regardless of fresh-skip logic.
-    if let Some(first_uuid) = conv_list.first().and_then(|c| c.get("uuid")).and_then(|v| v.as_str()) {
-        let probe_url = format!(
-            "https://claude.ai/api/organizations/{}/chat_conversations/{}?rendering_mode=raw",
-            org_id, first_uuid,
-        );
-        eprintln!("[web-sync] PROBE: GET {}", probe_url);
-        match client.get(&probe_url).header(reqwest::header::COOKIE, &cookie_header).send().await {
-            Ok(r) if r.status().is_success() => {
-                let text = r.text().await.unwrap_or_default();
-                let _ = std::fs::write("/tmp/lovcode-web-probe.json", &text);
-                eprintln!("[web-sync] PROBE: dumped {} bytes to /tmp/lovcode-web-probe.json", text.len());
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                    if let Some(obj) = v.as_object() {
-                        let keys: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
-                        eprintln!("[web-sync] PROBE: top keys = {:?}", keys);
-                        if let Some(cm) = obj.get("chat_messages").and_then(|v| v.as_array()) {
-                            eprintln!("[web-sync] PROBE: chat_messages.len = {}", cm.len());
-                        } else {
-                            eprintln!("[web-sync] PROBE: NO chat_messages field");
-                        }
-                    }
-                }
-            }
-            Ok(r) => eprintln!("[web-sync] PROBE: HTTP {}", r.status()),
-            Err(e) => eprintln!("[web-sync] PROBE: send err: {}", e),
-        }
-    }
+    // Cache web starred conversation uuids to disk so the frontend pin sync
+    // can pick them up alongside Claude Code starredIds.
+    let web_starred: Vec<String> = conv_list.iter()
+        .filter(|c| c.get("is_starred").and_then(|v| v.as_bool()).unwrap_or(false))
+        .filter_map(|c| c.get("uuid").and_then(|v| v.as_str()).map(String::from))
+        .collect();
+    let cache_path = get_lovstudio_dir().join("claude-web-starred.json");
+    if let Some(parent) = cache_path.parent() { let _ = std::fs::create_dir_all(parent); }
+    let _ = std::fs::write(&cache_path, serde_json::to_string(&web_starred).unwrap_or_else(|_| "[]".into()));
+    eprintln!("[web-sync] cached {} web-starred conversations", web_starred.len());
 
     // 5. Prepare project dir
     let project_id = "-claude-ai".to_string();

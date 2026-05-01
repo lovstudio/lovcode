@@ -87,6 +87,12 @@ export function GlobalHeader({
         {/* Center: menu group */}
         <div className="flex-1 flex items-center justify-center gap-0.5" data-tauri-drag-region>
           <NavButton
+            isActive={primaryFeature === "chat"}
+            onClick={() => handleMainNavClick("chat")}
+            icon={<CounterClockwiseClockIcon className="w-4 h-4" />}
+            label="Chat"
+          />
+          <NavButton
             isActive={primaryFeature === "workspace"}
             onClick={() => handleMainNavClick("workspace")}
             icon={<RocketIcon className="w-4 h-4" />}
@@ -97,12 +103,6 @@ export function GlobalHeader({
             onClick={() => handleMainNavClick("features")}
             icon={<LayersIcon className="w-4 h-4" />}
             label="Configuration"
-          />
-          <NavButton
-            isActive={primaryFeature === "chat"}
-            onClick={() => handleMainNavClick("chat")}
-            icon={<CounterClockwiseClockIcon className="w-4 h-4" />}
-            label="Chat"
           />
           <NavButton
             isActive={primaryFeature?.startsWith("kb-") ?? false}

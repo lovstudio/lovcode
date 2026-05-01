@@ -24,6 +24,17 @@ export const showArchivedSessionsAtom = atomWithStorage("lovcode:sidebar:showArc
 // but stored locally — Claude app does not expose pin state in claude-code-sessions JSON.
 export const pinnedSessionIdsAtom = atomWithStorage<string[]>("lovcode:sidebar:pinnedSessionIds", []);
 
+// Local override: ids that were starred upstream by Claude app/web but the user
+// unpinned in lovcode. Subtracted from the effective pinned set so toggling a
+// Claude-starred session here actually un-pins it locally (without writing back
+// to claude.ai). Cleared automatically if upstream un-stars the same id.
+export const unpinnedAppIdsAtom = atomWithStorage<string[]>("lovcode:sidebar:unpinnedAppIds", []);
+
+// Whether the Pinned section in the sidebar is collapsed
+export const pinnedCollapsedAtom = atomWithStorage("lovcode:sidebar:pinnedCollapsed", false);
+export const recentCollapsedAtom = atomWithStorage("lovcode:sidebar:recentCollapsed", false);
+export const importCollapsedAtom = atomWithStorage("lovcode:sidebar:importCollapsed", false);
+
 // ProjectList
 export const chatViewModeAtom = atomWithStorage<"projects" | "sessions" | "chats">("lovcode:chatViewMode", "projects");
 export const allProjectsSortByAtom = atomWithStorage<"name" | "recent" | "sessions">("lovcode:allProjects:sortBy", "recent");
