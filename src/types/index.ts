@@ -64,6 +64,7 @@ export interface Session {
   created_at: number;
   last_modified: number;
   usage?: SessionUsage;
+  source: "cli" | "app";
 }
 
 export interface SessionUsageEntry {

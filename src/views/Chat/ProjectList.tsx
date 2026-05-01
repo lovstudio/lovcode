@@ -1,8 +1,9 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ChevronDownIcon, ChevronRightIcon, DotsHorizontalIcon, ListBulletIcon, GroupIcon, MixIcon, MagnifyingGlassIcon, Cross2Icon } from "@radix-ui/react-icons";
-import { Copy, Upload, ChevronUp, ChevronDown } from "lucide-react";
+import { Copy, Upload, ChevronUp, ChevronDown, Pin, PinOff, RefreshCw } from "lucide-react";
 import { useAtom } from "jotai";
 import {
   allProjectsSortByAtom,
@@ -10,6 +11,7 @@ import {
   originalChatAtom,
   markdownPreviewAtom,
   userPromptsOnlyAtom,
+  pinnedSessionIdsAtom,
 } from "../../store";
 import { useAppConfig } from "../../context";
 import { useReadableText } from "./utils";
@@ -48,10 +50,14 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
   const { data: allSessions = [], isLoading: loadingSessions } = useInvokeQuery<Session[]>(["sessions"], "list_all_sessions");
 
   const [importing, setImporting] = useState(false);
-  const [dataSource, setDataSource] = useState<"all" | "local" | "web">("all");
+  const [dataSource, setDataSource] = useState<"all" | "local" | "web" | "app">("all");
 
   const [sortBy, setSortBy] = useAtom(allProjectsSortByAtom);
   const [hideEmptySessions, setHideEmptySessions] = useAtom(hideEmptySessionsAllAtom);
+  const [pinnedIds, setPinnedIds] = useAtom(pinnedSessionIdsAtom);
+  const togglePin = (id: string) => {
+    setPinnedIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
+  };
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string> | null>(null);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [grouped, setGrouped] = useState(true);
@@ -74,6 +80,117 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
       .then(() => setIndexReady(true))
       .catch(() => {});
   }, []);
+
+  // Auto-sync claude.ai web conversations on mount.
+  // Reads the Claude desktop app's session cookie (decrypted via macOS Keychain),
+  // calls claude.ai API, and writes new/changed conversations into
+  // ~/.claude/projects/-claude-ai/. Failures are silent (Claude app may not be
+  // installed/logged-in).
+  const [webSyncing, setWebSyncing] = useState(false);
+  const [webSyncError, setWebSyncError] = useState<string | null>(null);
+  const [webSyncProgress, setWebSyncProgress] = useState<{ processed: number; total: number; fetched: number; failed: number } | null>(null);
+
+  // Trigger a list refresh every ~20 newly-fetched conversations so the user
+  // sees results streaming in instead of waiting for the whole batch.
+  const lastInvalidatedAtRef = useRef(0);
+  useEffect(() => {
+    const unlistenP = listen<{ processed: number; total: number; fetched: number; skipped: number; failed: number }>(
+      "web-sync-progress",
+      (e) => {
+        setWebSyncProgress({
+          processed: e.payload.processed,
+          total: e.payload.total,
+          fetched: e.payload.fetched,
+          failed: e.payload.failed,
+        });
+        if (e.payload.fetched - lastInvalidatedAtRef.current >= 20) {
+          lastInvalidatedAtRef.current = e.payload.fetched;
+          queryClient.invalidateQueries({ queryKey: ["projects"] });
+          queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        }
+      }
+    );
+    return () => { unlistenP.then((fn) => fn()).catch(() => {}); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const syncWebFromApp = async () => {
+    if (webSyncing) return;
+    setWebSyncing(true);
+    setWebSyncError(null);
+    lastInvalidatedAtRef.current = 0;
+    try {
+      const result = await invoke<{ fetched: number; skipped_unchanged: number; failed: number }>(
+        "sync_claude_web_conversations"
+      );
+      // Always invalidate — even if 0 fetched, the project dir may have been
+      // created with .display_name, which affects hasWebData / project list.
+      queryClient.invalidateQueries({ queryKey: ["projects"] });
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      console.log("[web-sync]", result);
+    } catch (e) {
+      console.warn("[web-sync] failed:", e);
+      setWebSyncError(String(e));
+    } finally {
+      setWebSyncing(false);
+      setWebSyncProgress(null);
+    }
+  };
+  const webSyncedRef = useRef(false);
+  useEffect(() => {
+    if (webSyncedRef.current) return;
+    webSyncedRef.current = true;
+    syncWebFromApp();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Sync pinned state from Claude desktop app's "starredIds".
+  //
+  // Storage model:
+  //   - pinnedIds (atomWithStorage)  = user's manual pins ONLY (source-agnostic)
+  //   - appStarredIds (in-memory)    = pins coming from Claude app (source=app)
+  //   - effectivePinnedSet           = union, used for display
+  //
+  // This way the user's local pin set is never polluted by app starredIds. If
+  // the user un-stars something in the app, it disappears here on next sync
+  // automatically. If the user clicks pin on a CLI/web session, it persists
+  // even when the app un-stars sessions. Code tab will only show user pins
+  // because app sessions are filtered out by dataSource.
+  const [appStarredIds, setAppStarredIds] = useState<string[]>([]);
+  const syncPinsFromApp = async () => {
+    try {
+      const appStarred = await invoke<string[]>("get_app_starred_session_ids");
+      setAppStarredIds(appStarred);
+    } catch {
+      // Claude app may not be installed or starredIds not yet written
+    }
+  };
+
+  // Auto-sync once when the sessions list becomes available.
+  // Also cleans up legacy state: previous versions of this code merged app
+  // starredIds INTO pinnedIds, so users may have stale app-session ids in
+  // their localStorage. Strip them on first run so the new dual-store model
+  // is consistent.
+  const syncedRef = useRef(false);
+  useEffect(() => {
+    if (syncedRef.current) return;
+    if (allSessions.length === 0) return;
+    syncedRef.current = true;
+    const appSessionIdSet = new Set(allSessions.filter((s) => s.source === "app").map((s) => s.id));
+    setPinnedIds((prev) => {
+      const cleaned = prev.filter((id) => !appSessionIdSet.has(id));
+      return cleaned.length === prev.length ? prev : cleaned;
+    });
+    syncPinsFromApp();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allSessions]);
+
+  // Effective pin set for display = user pins ∪ app starred ids.
+  // Re-computed on every sync; never persisted as a whole.
+  const effectivePinnedSet = useMemo(() => {
+    const s = new Set<string>(pinnedIds);
+    for (const id of appStarredIds) s.add(id);
+    return s;
+  }, [pinnedIds, appStarredIds]);
 
   // Full-text search across session summaries/titles + content via search_chats
   useEffect(() => {
@@ -115,13 +232,32 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
 
   const loading = loadingProjects || loadingSessions;
 
-  const hasWebData = useMemo(() => projects.some((p) => p.id === "-claude-ai"), [projects]);
+  // Web and App tabs are always shown — they represent first-class data
+  // sources (claude.ai web conversations, Claude desktop app Code sessions),
+  // independent of whether any data has been synced yet.
+  const hasWebData = true;
+  const hasAppData = true;
+
+  // Sessions visible under the current data source — used for the header counter
+  // so it matches what the user actually sees in the list.
+  const visibleSessions = useMemo(() => {
+    return allSessions.filter((s) => {
+      if (dataSource === "local") return s.project_id !== "-claude-ai" && s.source !== "app";
+      if (dataSource === "web") return s.project_id === "-claude-ai";
+      if (dataSource === "app") return s.source === "app";
+      return true;
+    });
+  }, [allSessions, dataSource]);
 
   const sortedProjects = useMemo(() => {
     const filtered = projects.filter((p) => {
       if (p.session_count === 0) return false;
       if (dataSource === "local") return p.id !== "-claude-ai";
       if (dataSource === "web") return p.id === "-claude-ai";
+      if (dataSource === "app") {
+        // Only show projects that have at least one app session
+        return allSessions.some((s) => s.source === "app" && s.project_id === p.id);
+      }
       return true;
     });
     return [...filtered].sort((a, b) => {
@@ -131,7 +267,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
         case "name": return a.path.localeCompare(b.path);
       }
     });
-  }, [projects, sortBy, dataSource]);
+  }, [projects, allSessions, sortBy, dataSource]);
 
   const sessionsByProject = useMemo(() => {
     const map = new Map<string, Session[]>();
@@ -143,6 +279,8 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
         .filter((s) => {
           if (!s.project_path) return false;
           if (hideEmptySessions && s.message_count === 0) return false;
+          if (dataSource === "app" && s.source !== "app") return false;
+          if (effectivePinnedSet.has(s.id)) return false; // surfaced in the top Pinned section
           return normalizePath(s.project_path) === projectPathNorm;
         })
         .sort((a, b) => {
@@ -155,15 +293,36 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
       map.set(project.id, sessions);
     }
     return map;
-  }, [sortedProjects, allSessions, sortBy, hideEmptySessions]);
+  }, [sortedProjects, allSessions, sortBy, hideEmptySessions, dataSource, effectivePinnedSet]);
+
+  // Pinned sessions surface as a dedicated top group (independent of grouped/flat mode).
+  // Filtered the same way as the main list so the active data source / hide-empty toggles still apply.
+  const pinnedSessions = useMemo(() => {
+    if (effectivePinnedSet.size === 0) return [];
+    const seen = new Set<string>();
+    return allSessions
+      .filter((s) => effectivePinnedSet.has(s.id))
+      .filter((s) => {
+        if (seen.has(s.id)) return false; // defensive dedupe — backend may emit dupes for same cliSessionId
+        seen.add(s.id);
+        if (hideEmptySessions && s.message_count === 0) return false;
+        if (dataSource === "local") return s.project_id !== "-claude-ai" && s.source !== "app";
+        if (dataSource === "web") return s.project_id === "-claude-ai";
+        if (dataSource === "app") return s.source === "app";
+        return true;
+      })
+      .sort((a, b) => b.last_modified - a.last_modified);
+  }, [allSessions, effectivePinnedSet, hideEmptySessions, dataSource]);
 
   const flatSessions = useMemo(() => {
     if (grouped) return [];
     return allSessions
       .filter((s) => {
         if (s.message_count === 0 && hideEmptySessions) return false;
-        if (dataSource === "local") return s.project_id !== "-claude-ai";
+        if (effectivePinnedSet.has(s.id)) return false; // surfaced in the top Pinned section
+        if (dataSource === "local") return s.project_id !== "-claude-ai" && s.source !== "app";
         if (dataSource === "web") return s.project_id === "-claude-ai";
+        if (dataSource === "app") return s.source === "app";
         return true;
       })
       .sort((a, b) => {
@@ -173,7 +332,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
           case "name": return (a.summary || "").localeCompare(b.summary || "");
         }
       });
-  }, [allSessions, sortBy, hideEmptySessions, grouped, dataSource]);
+  }, [allSessions, sortBy, hideEmptySessions, grouped, dataSource, effectivePinnedSet]);
 
   const doImport = async (path: string) => {
     setImporting(true);
@@ -231,25 +390,50 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
         <div className="px-4 py-4">
           <h2 className="font-serif text-lg font-semibold text-ink mb-1">Chat History</h2>
           <p className="text-xs text-muted-foreground mb-3">
-            {sortedProjects.length} projects · {allSessions.length} sessions
+            {sortedProjects.length} projects · {visibleSessions.length} sessions
           </p>
 
           {/* Data source tabs */}
-          {hasWebData && (
+          {(hasWebData || hasAppData) && (
             <div className="flex gap-0.5 mb-2 p-0.5 rounded-lg bg-card-alt">
-              {(["all", "local", "web"] as const).map((src) => (
+              {([
+                { key: "all", label: "All" },
+                { key: "local", label: "Code" },
+                ...(hasAppData ? [{ key: "app", label: "App" }] : []),
+                ...(hasWebData ? [{ key: "web", label: "Web" }] : []),
+              ] as { key: typeof dataSource; label: string }[]).map(({ key, label }) => (
                 <button
-                  key={src}
-                  onClick={() => setDataSource(src)}
+                  key={key}
+                  onClick={() => setDataSource(key)}
                   className={`flex-1 px-2 py-1 rounded-md text-xs transition-colors ${
-                    dataSource === src
+                    dataSource === key
                       ? "bg-card text-ink shadow-sm"
                       : "text-muted-foreground hover:text-ink"
                   }`}
                 >
-                  {src === "all" ? "All" : src === "local" ? "Code" : "Web"}
+                  {label}
                 </button>
               ))}
+            </div>
+          )}
+
+          {/* Web tab status (only visible when Web tab is active) */}
+          {dataSource === "web" && (webSyncing || webSyncError) && (
+            <div className="mb-2 px-2 py-1.5 rounded-md bg-card-alt text-[11px]">
+              {webSyncing && (
+                <div className="flex items-center gap-1.5 text-primary/90">
+                  <RefreshCw className="w-3 h-3 animate-spin shrink-0" />
+                  <span className="truncate">
+                    Syncing claude.ai
+                    {webSyncProgress && ` · ${webSyncProgress.processed}/${webSyncProgress.total} (+${webSyncProgress.fetched}${webSyncProgress.failed ? ` ✗${webSyncProgress.failed}` : ""})`}
+                  </span>
+                </div>
+              )}
+              {!webSyncing && webSyncError && (
+                <div className="text-destructive truncate" title={webSyncError}>
+                  Web sync failed: {webSyncError}
+                </div>
+              )}
             </div>
           )}
 
@@ -289,6 +473,15 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
 
             <div className="flex-1" />
 
+            {/* Sync pins from Claude app */}
+            <button
+              onClick={syncPinsFromApp}
+              className="p-1.5 rounded-md transition-colors text-muted-foreground hover:text-ink hover:bg-card-alt"
+              title="Sync pins from Claude app (starred sessions)"
+            >
+              <Pin className="w-3.5 h-3.5" />
+            </button>
+
             {/* Grouped/Flat toggle */}
             <button
               onClick={() => setGrouped(!grouped)}
@@ -324,7 +517,12 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
                   <Upload className="w-3.5 h-3.5" />
                 </button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="min-w-[160px]">
+              <DropdownMenuContent align="end" className="min-w-[200px]">
+                <DropdownMenuItem onClick={syncWebFromApp} disabled={webSyncing} className="gap-2">
+                  <RefreshCw className={`w-3.5 h-3.5 ${webSyncing ? "animate-spin" : ""}`} />
+                  {webSyncing ? "Syncing..." : "Sync from claude.ai (live)"}
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={handleImportZip}>Import .zip</DropdownMenuItem>
                 <DropdownMenuItem onClick={handleImportDir}>Import folder</DropdownMenuItem>
               </DropdownMenuContent>
@@ -334,6 +532,33 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
 
         {/* Session List */}
         <div className="px-2 pb-4 space-y-0.5">
+          {/* Pinned section — independent of grouped/flat, hidden during search */}
+          {searchResults === null && pinnedSessions.length > 0 && (
+            <div className="mb-1">
+              <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] uppercase tracking-wide text-muted-foreground/70">
+                <Pin className="w-3 h-3 fill-current text-primary/60" />
+                <span>Pinned</span>
+                <span className="ml-auto">{pinnedSessions.length}</span>
+              </div>
+              <div className="space-y-0.5">
+                {pinnedSessions.map((session) => (
+                  <SessionItemButton
+                    key={`pinned-${session.id}`}
+                    session={session}
+                    isSelected={selectedSession?.id === session.id}
+                    onClick={() => setSelectedSession(prev => prev?.id === session.id ? null : session)}
+                    onDoubleClick={() => onSelectSession(session)}
+                    toReadable={toReadable}
+                    showProject
+                    isPinned
+                    onTogglePin={() => togglePin(session.id)}
+                  />
+                ))}
+              </div>
+              <div className="mx-2 my-1.5 border-t border-border/60" />
+            </div>
+          )}
+
           {searchResults !== null ? (
             // Search results (flat)
             searchResults.length === 0 ? (
@@ -349,12 +574,18 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
                   toReadable={toReadable}
                   showProject
                   highlight={searchQuery}
+                  isPinned={effectivePinnedSet.has(session.id)}
+                  onTogglePin={() => togglePin(session.id)}
                 />
               ))
             )
           ) : grouped ? (
             // Grouped by project
-            sortedProjects.map((project) => {
+            sortedProjects.length === 0 ? (
+              <div className="text-xs text-muted-foreground px-2 py-6 text-center">
+                No {dataSource === "all" ? "" : dataSource === "local" ? "code " : dataSource === "app" ? "app " : "web "}sessions
+              </div>
+            ) : sortedProjects.map((project) => {
               const sessions = sessionsByProject.get(project.id) || [];
               const isCollapsed = collapsedGroups?.has(project.id) ?? true;
               const cleanPath = project.path.replace(/\/+$/, "");
@@ -393,6 +624,8 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
                             onClick={() => setSelectedSession(prev => prev?.id === session.id ? null : session)}
                             onDoubleClick={() => onSelectSession(session)}
                             toReadable={toReadable}
+                            isPinned={effectivePinnedSet.has(session.id)}
+                            onTogglePin={() => togglePin(session.id)}
                           />
                         ))
                       )}
@@ -403,7 +636,11 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
             })
           ) : (
             // Flat list
-            flatSessions.map((session) => (
+            flatSessions.length === 0 ? (
+              <div className="text-xs text-muted-foreground px-2 py-6 text-center">
+                No {dataSource === "all" ? "" : dataSource === "local" ? "code " : dataSource === "app" ? "app " : "web "}sessions
+              </div>
+            ) : flatSessions.map((session) => (
               <SessionItemButton
                 key={session.id}
                 session={session}
@@ -412,6 +649,8 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
                 onDoubleClick={() => onSelectSession(session)}
                 toReadable={toReadable}
                 showProject
+                isPinned={effectivePinnedSet.has(session.id)}
+                onTogglePin={() => togglePin(session.id)}
               />
             ))
           )}
@@ -457,6 +696,8 @@ function SessionItemButton({
   toReadable,
   showProject,
   highlight,
+  isPinned,
+  onTogglePin,
 }: {
   session: Session;
   isSelected: boolean;
@@ -465,19 +706,34 @@ function SessionItemButton({
   toReadable: (s: string | null) => string;
   showProject?: boolean;
   highlight?: string;
+  isPinned?: boolean;
+  onTogglePin?: () => void;
 }) {
   const titleText = session.title || toReadable(session.summary) || "Untitled";
   const projectName = session.project_path?.split("/").pop() ?? "";
   return (
-    <button
+    <div
       onClick={onClick}
       onDoubleClick={onDoubleClick}
-      className={`w-full text-left flex items-center gap-1.5 px-2 py-1 rounded text-xs transition-colors min-w-0 ${
+      className={`group relative w-full text-left flex items-center gap-1.5 px-2 py-1 rounded text-xs transition-colors min-w-0 cursor-pointer ${
         isSelected
           ? "bg-primary/10 text-ink"
           : "text-muted-foreground hover:text-ink hover:bg-card-alt"
-      }`}
+      } ${isPinned ? "before:content-[''] before:absolute before:left-0 before:top-1 before:bottom-1 before:w-0.5 before:rounded-full before:bg-primary/70" : ""}`}
     >
+      {onTogglePin && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onTogglePin(); }}
+          className={`p-0.5 rounded shrink-0 transition-opacity ${
+            isPinned
+              ? "text-primary opacity-100"
+              : "text-muted-foreground/50 opacity-0 group-hover:opacity-100 hover:text-ink"
+          }`}
+          title={isPinned ? "Unpin" : "Pin to top"}
+        >
+          {isPinned ? <Pin className="w-3 h-3 fill-current" /> : <PinOff className="w-3 h-3" />}
+        </button>
+      )}
       <div className="truncate flex-1 min-w-0">
         <span className="truncate block">
           <HighlightText text={titleText} query={highlight} />
@@ -488,10 +744,15 @@ function SessionItemButton({
           </span>
         )}
       </div>
-      <span className="text-[10px] text-muted-foreground shrink-0">
-        {session.message_count}
-      </span>
-    </button>
+      <div className="flex items-center gap-1 shrink-0">
+        {session.source === "app" && (
+          <span className="w-1.5 h-1.5 rounded-full bg-primary/60 shrink-0" title="Opened via Claude app" />
+        )}
+        <span className="text-[10px] text-muted-foreground">
+          {session.message_count}
+        </span>
+      </div>
+    </div>
   );
 }
 
@@ -512,13 +773,17 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
   const displaySummary = session.title || toReadable(session.summary) || "Untitled";
 
   useEffect(() => {
+    let cancelled = false;
     setLoading(true);
+    setMessages([]);
     invoke<Message[]>("get_session_messages", {
       projectId: session.project_id,
       sessionId: session.id,
     })
-      .then(setMessages)
-      .finally(() => setLoading(false));
+      .then((m) => { if (!cancelled) setMessages(m); })
+      .catch(() => { if (!cancelled) setMessages([]); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
   }, [session.project_id, session.id]);
 
   const filteredMessages = useMemo(() => {
@@ -676,6 +941,11 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
       {loading ? (
         <div className="flex items-center justify-center py-12">
           <p className="text-muted-foreground text-sm">Loading messages...</p>
+        </div>
+      ) : filteredMessages.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-12 gap-1 text-muted-foreground text-sm">
+          <span>No messages in this session</span>
+          <span className="text-xs opacity-60">{session.id}</span>
         </div>
       ) : (
         <div className="space-y-3">

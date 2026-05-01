@@ -15,6 +15,7 @@ export {
   sidebarSessionSortByAtom, type SessionSortBy,
   sidebarViewModeAtom, type SidebarViewMode,
   archivedSessionIdsAtom, showArchivedSessionsAtom,
+  pinnedSessionIdsAtom,
 } from "./atoms/chat";
 
 // Settings atoms

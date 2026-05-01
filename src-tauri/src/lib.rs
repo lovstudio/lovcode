@@ -1,3 +1,4 @@
+mod claude_web_sync;
 mod diagnostics;
 mod hook_watcher;
 mod pty_manager;
@@ -184,6 +185,13 @@ pub struct Session {
     pub created_at: u64,
     pub last_modified: u64,
     pub usage: Option<SessionUsage>,
+    /// "cli" (default) or "app" (opened via Claude desktop app Code tab)
+    #[serde(default = "default_source")]
+    pub source: String,
+}
+
+fn default_source() -> String {
+    "cli".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -702,6 +710,7 @@ async fn list_sessions(project_id: String) -> Result<Vec<Session>, String> {
                     created_at,
                     last_modified,
                     usage: None,
+                    source: "cli".to_string(),
                 });
             }
         }
@@ -746,8 +755,13 @@ fn read_session_usage(path: &Path) -> SessionUsage {
             Err(_) => continue,
         };
         if let Ok(parsed) = serde_json::from_str::<RawLine>(&line) {
-            // Only assistant messages have usage data
-            if parsed.line_type.as_deref() == Some("assistant") {
+            // Only assistant messages have usage data. Match both legacy
+            // (type=assistant) and Claude desktop app (type=message + role=assistant).
+            let lt = parsed.line_type.as_deref();
+            let is_assistant = lt == Some("assistant")
+                || (lt == Some("message")
+                    && parsed.message.as_ref().and_then(|m| m.role.as_deref()) == Some("assistant"));
+            if is_assistant {
                 if let Some(msg) = &parsed.message {
                     if let Some(u) = &msg.usage {
                         usage.input_tokens += u.input_tokens.unwrap_or(0);
@@ -819,6 +833,31 @@ fn slug_to_title(slug: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Count user+assistant messages by streaming the whole file.
+/// Cheap: only parses the `type` field via a tiny regex-free string check.
+///
+/// Two on-disk formats need to be supported:
+/// - Legacy CLI: top-level `"type":"user"` / `"type":"assistant"`
+/// - Claude desktop app (Code 栏): top-level `"type":"user"` / `"type":"message"`,
+///   where assistant turns are wrapped as `{"type":"message","message":{"role":"assistant",...}}`.
+fn count_session_messages(path: &Path) -> usize {
+    use std::io::{BufRead, BufReader};
+    let file = match fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return 0,
+    };
+    let reader = BufReader::new(file);
+    let mut count = 0;
+    for line in reader.lines().map_while(Result::ok) {
+        if line.contains("\"type\":\"user\"") || line.contains("\"type\":\"assistant\"") {
+            count += 1;
+        } else if line.contains("\"type\":\"message\"") && line.contains("\"role\":\"assistant\"") {
+            count += 1;
+        }
+    }
+    count
 }
 
 /// Read only the first N lines of a session file to get summary (much faster than reading entire file)
@@ -899,11 +938,28 @@ fn read_session_head(path: &Path, max_lines: usize) -> SessionHead {
             if parsed.line_type.as_deref() == Some("assistant") {
                 message_count += 1;
             }
+            // Claude desktop app format wraps assistant turns as type=message + role=assistant
+            if parsed.line_type.as_deref() == Some("message") {
+                if let Some(msg) = &parsed.message {
+                    if msg.role.as_deref() == Some("assistant") || msg.role.as_deref() == Some("user") {
+                        message_count += 1;
+                    }
+                }
+            }
         }
     }
 
     let title = slug.map(|s| slug_to_title(&s));
     let final_summary = summary.or(first_user_message).map(|s| restore_slash_command(&s));
+
+    // The head sample (first N lines) only sees messages in the front of the
+    // file. For accurate counts (esp. for sessions where the head is filled
+    // with non-message entries like queue-operation/summary/hook events), do
+    // one cheap streaming pass over the whole file. This is fast — we only
+    // substring-match `"type":"user|assistant"` per line, no JSON parse.
+    let _ = message_count;
+    let message_count = count_session_messages(path);
+
     SessionHead { title, summary: final_summary, cwd, message_count }
 }
 
@@ -1043,6 +1099,7 @@ async fn list_all_sessions() -> Result<Vec<Session>, String> {
                 created_at,
                 last_modified,
                 usage: None,
+                source: "cli".to_string(),
             });
         }
 
@@ -1097,16 +1154,309 @@ async fn list_all_sessions() -> Result<Vec<Session>, String> {
                         created_at,
                         last_modified,
                         usage: None,
+                        source: "cli".to_string(),
                     });
                 }
             }
         }
+
+        // Third pass: Claude desktop app Code tab sessions
+        // ~/Library/Application Support/Claude/claude-code-sessions/<deviceId>/<accountId>/local_*.json
+        // These have richer metadata (title, cwd, lastActivityAt) and link to the same CLI .jsonl files.
+        if let Some(home) = dirs::home_dir() {
+            let app_sessions_root = home
+                .join("Library")
+                .join("Application Support")
+                .join("Claude")
+                .join("claude-code-sessions");
+            if app_sessions_root.exists() {
+                // walk deviceId / accountId levels
+                for device_entry in fs::read_dir(&app_sessions_root).into_iter().flatten().flatten() {
+                    for account_entry in fs::read_dir(device_entry.path()).into_iter().flatten().flatten() {
+                        for file_entry in fs::read_dir(account_entry.path()).into_iter().flatten().flatten() {
+                            let file_path = file_entry.path();
+                            let fname = file_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                            if !fname.starts_with("local_") || !fname.ends_with(".json") {
+                                continue;
+                            }
+                            let Ok(content) = fs::read_to_string(&file_path) else { continue };
+                            let Ok(meta) = serde_json::from_str::<serde_json::Value>(&content) else { continue };
+
+                            let cli_session_id = match meta.get("cliSessionId").and_then(|v| v.as_str()) {
+                                Some(id) => id.to_string(),
+                                None => continue,
+                            };
+                            let cwd = match meta.get("cwd").and_then(|v| v.as_str()) {
+                                Some(p) => p.to_string(),
+                                None => continue,
+                            };
+
+                            // Claude CLI encodes non-ASCII chars (e.g. 手工川 -> ----) in
+                            // a lossy way that cannot be reversed by string substitution.
+                            // Instead, scan project_dirs for the dir containing this jsonl.
+                            let jsonl_filename = format!("{}.jsonl", cli_session_id);
+                            let project_id = match seen_sessions.iter().find(|(_, sid)| sid == &cli_session_id) {
+                                Some((pid, _)) => pid.clone(),
+                                None => {
+                                    // Fall back to filesystem scan
+                                    let mut found = None;
+                                    if let Ok(entries) = fs::read_dir(&projects_dir) {
+                                        for e in entries.flatten() {
+                                            if e.path().join(&jsonl_filename).exists() {
+                                                found = Some(e.file_name().to_string_lossy().to_string());
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    // Last resort: synthesize encoded id (works for ASCII-only paths)
+                                    found.unwrap_or_else(|| encode_project_path(&cwd))
+                                }
+                            };
+
+                            // Skip if CLI already loaded this session with better data
+                            if seen_sessions.contains(&(project_id.clone(), cli_session_id.clone())) {
+                                // Upgrade title if app has one and CLI didn't
+                                if let Some(s) = all_sessions.iter_mut().find(|s| s.id == cli_session_id && s.project_id == project_id) {
+                                    if s.title.is_none() {
+                                        s.title = meta.get("title").and_then(|v| v.as_str()).map(|t| t.to_string());
+                                    }
+                                    s.source = "app".to_string();
+                                }
+                                continue;
+                            }
+
+                            // Find the CLI .jsonl to get message_count
+                            let jsonl_path = projects_dir.join(&project_id).join(&jsonl_filename);
+                            let (message_count, jsonl_modified, jsonl_created) = if jsonl_path.exists() {
+                                let head = read_session_head(&jsonl_path, 20);
+                                let metadata = fs::metadata(&jsonl_path).ok();
+                                let modified = metadata.as_ref()
+                                    .and_then(|m| m.modified().ok())
+                                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(0);
+                                let created = metadata.as_ref()
+                                    .and_then(|m| m.created().ok())
+                                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(modified);
+                                (head.message_count, modified, created)
+                            } else {
+                                (0, 0, 0)
+                            };
+
+                            let last_activity_ms = meta.get("lastActivityAt").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let last_modified = if jsonl_modified > 0 { jsonl_modified } else { last_activity_ms / 1000 };
+                            let created_at = if jsonl_created > 0 { jsonl_created } else {
+                                meta.get("createdAt").and_then(|v| v.as_u64()).map(|ms| ms / 1000).unwrap_or(last_modified)
+                            };
+
+                            let title = meta.get("title").and_then(|v| v.as_str()).map(|t| t.to_string());
+
+                            seen_sessions.insert((project_id.clone(), cli_session_id.clone()));
+                            all_sessions.push(Session {
+                                id: cli_session_id,
+                                project_id,
+                                project_path: Some(cwd),
+                                title,
+                                summary: None,
+                                message_count,
+                                created_at,
+                                last_modified,
+                                usage: None,
+                                source: "app".to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // De-duplicate by session id. The same cliSessionId can be registered
+        // from multiple passes if its project path encodes inconsistently
+        // (e.g. CLI uses a different lossy encoding than ours for non-ASCII
+        // cwds). When duplicates appear, keep the entry with the most
+        // complete data (highest message_count, prefer source=app for title).
+        let mut by_id: std::collections::HashMap<String, Session> = std::collections::HashMap::new();
+        for s in all_sessions.into_iter() {
+            match by_id.get(&s.id) {
+                Some(existing) => {
+                    let take_new = s.message_count > existing.message_count
+                        || (s.source == "app" && existing.source != "app");
+                    if take_new {
+                        let merged = Session {
+                            title: s.title.clone().or_else(|| existing.title.clone()),
+                            summary: s.summary.clone().or_else(|| existing.summary.clone()),
+                            ..s
+                        };
+                        by_id.insert(merged.id.clone(), merged);
+                    }
+                }
+                None => {
+                    by_id.insert(s.id.clone(), s);
+                }
+            }
+        }
+        let mut all_sessions: Vec<Session> = by_id.into_values().collect();
 
         all_sessions.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
         Ok(all_sessions)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Read Claude desktop app's "starredIds" (its name for pinned sessions) and
+/// translate them into our session ids (cliSessionIds).
+///
+/// The state lives in IndexedDB LevelDB at:
+///   ~/Library/Application Support/Claude/IndexedDB/https_claude.ai_0.indexeddb.leveldb/*.log
+///
+/// We can't open the LevelDB while Claude app is running (it holds an exclusive
+/// lock). Instead we scan the .log file (an append-only text-ish format) and
+/// extract the most recent `{"state":{"starredIds":[...]}}` blob — last write
+/// wins. This is read-only and lock-free.
+///
+/// The starredIds use app session ids (`local_<uuid>`); we map each to its
+/// cliSessionId by reading the matching `local_<uuid>.json` metadata file.
+#[tauri::command]
+async fn get_app_starred_session_ids() -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let Some(home) = dirs::home_dir() else { return Ok(vec![]); };
+        let leveldb_dir = home
+            .join("Library")
+            .join("Application Support")
+            .join("Claude")
+            .join("IndexedDB")
+            .join("https_claude.ai_0.indexeddb.leveldb");
+        if !leveldb_dir.exists() {
+            return Ok(vec![]);
+        }
+
+        // Find the most recent starredIds entry across all .log/.ldb files
+        let mut latest: Option<(u64, Vec<String>)> = None;
+        let needle = b"\"starredIds\"";
+
+        for entry in fs::read_dir(&leveldb_dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext != "log" && ext != "ldb" {
+                continue;
+            }
+            let Ok(bytes) = fs::read(&path) else { continue };
+
+            // Find every occurrence of `"starredIds"` and back up to the
+            // enclosing `{"state":...,"updatedAt":<num>}` object.
+            let mut search_from = 0;
+            while let Some(idx) = find_subslice(&bytes[search_from..], needle) {
+                let abs_idx = search_from + idx;
+                // Walk backward to nearest `{"state":` (start of the JSON object)
+                let start_marker = b"{\"state\":";
+                let start = match find_subslice_rev(&bytes[..abs_idx], start_marker) {
+                    Some(s) => s,
+                    None => { search_from = abs_idx + needle.len(); continue; },
+                };
+                // Walk forward to find the matching closing `}` by brace counting
+                let end = match scan_balanced_json(&bytes, start) {
+                    Some(e) => e,
+                    None => { search_from = abs_idx + needle.len(); continue; },
+                };
+                if let Ok(text) = std::str::from_utf8(&bytes[start..end]) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
+                        let updated_at = v.get("updatedAt").and_then(|x| x.as_u64()).unwrap_or(0);
+                        let ids: Vec<String> = v.get("state")
+                            .and_then(|s| s.get("starredIds"))
+                            .and_then(|a| a.as_array())
+                            .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                            .unwrap_or_default();
+                        if !ids.is_empty() {
+                            match &latest {
+                                Some((ts, _)) if *ts >= updated_at => {}
+                                _ => latest = Some((updated_at, ids)),
+                            }
+                        }
+                    }
+                }
+                search_from = end;
+            }
+        }
+
+        let app_ids = match latest {
+            Some((_, ids)) => ids,
+            None => return Ok(vec![]),
+        };
+
+        // Map app session ids (local_<uuid>) -> cliSessionId by scanning
+        // claude-code-sessions/<deviceId>/<accountId>/local_*.json
+        let app_sessions_root = home
+            .join("Library")
+            .join("Application Support")
+            .join("Claude")
+            .join("claude-code-sessions");
+
+        let mut id_to_cli: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        if app_sessions_root.exists() {
+            for d in fs::read_dir(&app_sessions_root).into_iter().flatten().flatten() {
+                for a in fs::read_dir(d.path()).into_iter().flatten().flatten() {
+                    for f in fs::read_dir(a.path()).into_iter().flatten().flatten() {
+                        let p = f.path();
+                        let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                        if !name.starts_with("local_") || !name.ends_with(".json") { continue; }
+                        let Ok(content) = fs::read_to_string(&p) else { continue };
+                        let Ok(meta) = serde_json::from_str::<serde_json::Value>(&content) else { continue };
+                        let session_id = meta.get("sessionId").and_then(|v| v.as_str()).map(String::from);
+                        let cli_id = meta.get("cliSessionId").and_then(|v| v.as_str()).map(String::from);
+                        if let (Some(sid), Some(cli)) = (session_id, cli_id) {
+                            id_to_cli.insert(sid, cli);
+                        }
+                    }
+                }
+            }
+        }
+
+        let resolved: Vec<String> = app_ids.into_iter()
+            .filter_map(|aid| id_to_cli.get(&aid).cloned())
+            .collect();
+        Ok(resolved)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+fn find_subslice_rev(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).rposition(|w| w == needle)
+}
+
+/// Scan a balanced JSON object starting at `start`. Returns one-past-end index.
+/// Naively counts braces while skipping over strings (which may contain `{}`).
+fn scan_balanced_json(bytes: &[u8], start: usize) -> Option<usize> {
+    if start >= bytes.len() || bytes[start] != b'{' { return None; }
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut escape = false;
+    for i in start..bytes.len() {
+        let b = bytes[i];
+        if in_str {
+            if escape { escape = false; continue; }
+            if b == b'\\' { escape = true; continue; }
+            if b == b'"' { in_str = false; }
+            continue;
+        }
+        match b {
+            b'"' => in_str = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 { return Some(i + 1); }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 #[tauri::command]
@@ -1199,24 +1549,27 @@ async fn list_all_chats(
                         }
                     }
 
-                    if line_type == Some("user") || line_type == Some("assistant") {
+                    let is_msg_line = matches!(line_type, Some("user") | Some("assistant") | Some("message"));
+                    if is_msg_line {
                         if let Some(msg) = &parsed.message {
                             let role = msg.role.clone().unwrap_or_default();
-                            let (text_content, _is_tool) = extract_content_with_meta(&msg.content);
-                            let is_meta = parsed.is_meta.unwrap_or(false);
+                            if role == "user" || role == "assistant" {
+                                let (text_content, _is_tool) = extract_content_with_meta(&msg.content);
+                                let is_meta = parsed.is_meta.unwrap_or(false);
 
-                            // Skip meta messages and empty content
-                            if !is_meta && !text_content.is_empty() {
-                                session_messages.push(ChatMessage {
-                                    uuid: parsed.uuid.unwrap_or_default(),
-                                    role,
-                                    content: text_content,
-                                    timestamp: parsed.timestamp.unwrap_or_default(),
-                                    project_id: project_id.clone(),
-                                    project_path: project_path.clone(),
-                                    session_id: session_id.clone(),
-                                    session_summary: None, // Will be filled later
-                                });
+                                // Skip meta messages and empty content
+                                if !is_meta && !text_content.is_empty() {
+                                    session_messages.push(ChatMessage {
+                                        uuid: parsed.uuid.unwrap_or_default(),
+                                        role,
+                                        content: text_content,
+                                        timestamp: parsed.timestamp.unwrap_or_default(),
+                                        project_id: project_id.clone(),
+                                        project_path: project_path.clone(),
+                                        session_id: session_id.clone(),
+                                        session_summary: None, // Will be filled later
+                                    });
+                                }
                             }
                         }
                     }
@@ -1270,25 +1623,32 @@ async fn get_session_messages(
         for (idx, line) in content.lines().enumerate() {
             if let Ok(parsed) = serde_json::from_str::<RawLine>(line) {
                 let line_type = parsed.line_type.as_deref();
-                if line_type == Some("user") || line_type == Some("assistant") {
-                    if let Some(msg) = &parsed.message {
-                        let role = msg.role.clone().unwrap_or_default();
-                        let (content, is_tool) = extract_content_with_meta(&msg.content);
-                        let content_blocks = extract_content_blocks(&msg.content);
-                        let is_meta = parsed.is_meta.unwrap_or(false);
+                // Accept legacy CLI format (type=user|assistant) and Claude desktop
+                // app format (type=message wrapping a {role:user|assistant} payload).
+                let is_msg_line = matches!(line_type, Some("user") | Some("assistant") | Some("message"));
+                if !is_msg_line {
+                    continue;
+                }
+                if let Some(msg) = &parsed.message {
+                    let role = msg.role.clone().unwrap_or_default();
+                    if role != "user" && role != "assistant" {
+                        continue;
+                    }
+                    let (content, is_tool) = extract_content_with_meta(&msg.content);
+                    let content_blocks = extract_content_blocks(&msg.content);
+                    let is_meta = parsed.is_meta.unwrap_or(false);
 
-                        if !content.is_empty() {
-                            messages.push(Message {
-                                uuid: parsed.uuid.unwrap_or_default(),
-                                role,
-                                content,
-                                timestamp: parsed.timestamp.unwrap_or_default(),
-                                is_meta,
-                                is_tool,
-                                line_number: idx + 1,
-                                content_blocks,
-                            });
-                        }
+                    if !content.is_empty() {
+                        messages.push(Message {
+                            uuid: parsed.uuid.unwrap_or_default(),
+                            role,
+                            content,
+                            timestamp: parsed.timestamp.unwrap_or_default(),
+                            is_meta,
+                            is_tool,
+                            line_number: idx + 1,
+                            content_blocks,
+                        });
                     }
                 }
             }
@@ -1446,25 +1806,28 @@ async fn build_search_index() -> Result<usize, String> {
                         if let Ok(parsed) = serde_json::from_str::<RawLine>(line) {
                             let line_type = parsed.line_type.as_deref();
 
-                            if line_type == Some("user") || line_type == Some("assistant") {
+                            let is_msg_line = matches!(line_type, Some("user") | Some("assistant") | Some("message"));
+                            if is_msg_line {
                                 if let Some(msg) = &parsed.message {
                                     let role = msg.role.clone().unwrap_or_default();
-                                    let (text_content, _) = extract_content_with_meta(&msg.content);
-                                    let is_meta = parsed.is_meta.unwrap_or(false);
+                                    if role == "user" || role == "assistant" {
+                                        let (text_content, _) = extract_content_with_meta(&msg.content);
+                                        let is_meta = parsed.is_meta.unwrap_or(false);
 
-                                    if !is_meta && !text_content.is_empty() {
-                                        index_writer.add_document(doc!(
-                                            uuid_field => parsed.uuid.clone().unwrap_or_default(),
-                                            content_field => text_content,
-                                            role_field => role,
-                                            project_id_field => project_id.clone(),
-                                            project_path_field => display_path.clone(),
-                                            session_id_field => session_id.clone(),
-                                            session_summary_field => session_summary.clone().unwrap_or_default(),
-                                            timestamp_field => parsed.timestamp.clone().unwrap_or_default(),
-                                        )).map_err(|e| e.to_string())?;
+                                        if !is_meta && !text_content.is_empty() {
+                                            index_writer.add_document(doc!(
+                                                uuid_field => parsed.uuid.clone().unwrap_or_default(),
+                                                content_field => text_content,
+                                                role_field => role,
+                                                project_id_field => project_id.clone(),
+                                                project_path_field => display_path.clone(),
+                                                session_id_field => session_id.clone(),
+                                                session_summary_field => session_summary.clone().unwrap_or_default(),
+                                                timestamp_field => parsed.timestamp.clone().unwrap_or_default(),
+                                            )).map_err(|e| e.to_string())?;
 
-                                        indexed_count += 1;
+                                            indexed_count += 1;
+                                        }
                                     }
                                 }
                             }
@@ -3048,6 +3411,7 @@ fn find_session_project(session_id: String) -> Result<Option<Session>, String> {
                 created_at: 0,
                 last_modified: 0,
                 usage: None,
+                source: "cli".to_string(),
             }));
         }
     }
@@ -7870,17 +8234,27 @@ fn convert_conversation_to_jsonl(conv: &ClaudeWebConversation) -> String {
             _ => continue,
         };
 
-        // Convert content blocks
-        let content_blocks: Vec<serde_json::Value> = msg
-            .content
-            .as_ref()
-            .map(|blocks| {
-                blocks
-                    .iter()
-                    .filter_map(|b| convert_web_content_block(b))
-                    .collect()
-            })
-            .unwrap_or_default();
+        // Convert content blocks. claude.ai's detail API returns messages
+        // without a `content` array — just a plain `text` field. Fall back to
+        // wrapping `text` as a single text block so live-synced conversations
+        // render the same way as zip-imported ones.
+        let content_blocks: Vec<serde_json::Value> = match msg.content.as_ref() {
+            Some(blocks) if !blocks.is_empty() => blocks
+                .iter()
+                .filter_map(|b| convert_web_content_block(b))
+                .collect(),
+            _ => {
+                if let Some(text) = msg.text.as_deref() {
+                    if !text.is_empty() {
+                        vec![serde_json::json!({ "type": "text", "text": text })]
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                }
+            }
+        };
 
         // Skip messages with no content
         if content_blocks.is_empty() {
@@ -8012,6 +8386,335 @@ async fn import_claude_web_data(path: String) -> Result<ImportResult, String> {
     .map_err(|e| e.to_string())?
 }
 
+#[derive(Debug, Serialize)]
+pub struct WebSyncResult {
+    pub fetched: usize,
+    pub skipped_unchanged: usize,
+    pub failed: usize,
+    pub project_id: String,
+}
+
+/// Live-sync claude.ai conversations using the Claude desktop app's session cookie.
+///
+/// Stateless incremental: lists all conversations' metadata from the API,
+/// compares each conversation's `updated_at` against the local jsonl file's
+/// mtime, only re-downloads when newer. Failures on individual conversations
+/// are counted but don't abort the run.
+#[derive(Debug, Clone, Serialize)]
+struct WebSyncProgress {
+    total: usize,
+    processed: usize,
+    fetched: usize,
+    skipped: usize,
+    failed: usize,
+}
+
+#[tauri::command]
+async fn sync_claude_web_conversations(app_handle: tauri::AppHandle) -> Result<WebSyncResult, String> {
+    eprintln!("[web-sync] step 1: reading & decrypting cookies");
+    // 1. Read & decrypt cookies (blocking work)
+    let cookies = tauri::async_runtime::spawn_blocking(claude_web_sync::read_claude_app_cookies)
+        .await
+        .map_err(|e| e.to_string())??;
+    eprintln!("[web-sync] step 1 ok, got {} cookies", cookies.len());
+    let session_key = cookies.get("sessionKey")
+        .ok_or_else(|| "sessionKey cookie not found — log into Claude desktop app first".to_string())?
+        .clone();
+    eprintln!("[web-sync] sessionKey length = {}", session_key.len());
+    let active_org = cookies.get("lastActiveOrg").cloned();
+    eprintln!("[web-sync] lastActiveOrg cookie = {:?}", active_org);
+
+    // 2. HTTP client with timeouts so we never hang
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let cookie_header = format!("sessionKey={}", session_key);
+
+    // 3. Resolve org_id — always fetch from API since the cookie value is
+    // URL-encoded JSON and unreliable to parse.
+    eprintln!("[web-sync] step 3: GET /api/organizations");
+    let org_id = {
+        let resp = client.get("https://claude.ai/api/organizations")
+            .header(reqwest::header::COOKIE, &cookie_header)
+            .send().await.map_err(|e| format!("fetch orgs: {}", e))?;
+        let status = resp.status();
+        eprintln!("[web-sync] orgs status: {}", status);
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("fetch orgs: HTTP {} — {}", status, body.chars().take(200).collect::<String>()));
+        }
+        let orgs: Vec<serde_json::Value> = resp.json().await.map_err(|e| format!("parse orgs: {}", e))?;
+        eprintln!("[web-sync] orgs count: {}", orgs.len());
+        let id = orgs.first()
+            .and_then(|o| o.get("uuid").and_then(|v| v.as_str()))
+            .map(String::from)
+            .ok_or_else(|| "no organizations found for this account".to_string())?;
+        // Prefer the cookie value if it's a clean uuid; otherwise use API result.
+        match active_org {
+            Some(o) if o.len() == 36 && o.chars().all(|c| c.is_ascii_hexdigit() || c == '-') => o,
+            _ => id,
+        }
+    };
+    eprintln!("[web-sync] org_id = {}", org_id);
+
+    // 4. List conversations (lightweight metadata)
+    let list_url = format!("https://claude.ai/api/organizations/{}/chat_conversations", org_id);
+    eprintln!("[web-sync] step 4: GET {}", list_url);
+    let resp = client.get(&list_url)
+        .header(reqwest::header::COOKIE, &cookie_header)
+        .send().await.map_err(|e| format!("list conversations: {}", e))?;
+    let status = resp.status();
+    eprintln!("[web-sync] list status: {}", status);
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("list conversations: HTTP {} — {}", status, body.chars().take(200).collect::<String>()));
+    }
+    let conv_list: Vec<serde_json::Value> = resp.json().await
+        .map_err(|e| format!("parse conversation list: {}", e))?;
+    eprintln!("[web-sync] got {} conversations from API", conv_list.len());
+
+    // PROBE: dump the first conversation's detail to /tmp so we can inspect
+    // the API schema regardless of fresh-skip logic.
+    if let Some(first_uuid) = conv_list.first().and_then(|c| c.get("uuid")).and_then(|v| v.as_str()) {
+        let probe_url = format!(
+            "https://claude.ai/api/organizations/{}/chat_conversations/{}?rendering_mode=raw",
+            org_id, first_uuid,
+        );
+        eprintln!("[web-sync] PROBE: GET {}", probe_url);
+        match client.get(&probe_url).header(reqwest::header::COOKIE, &cookie_header).send().await {
+            Ok(r) if r.status().is_success() => {
+                let text = r.text().await.unwrap_or_default();
+                let _ = std::fs::write("/tmp/lovcode-web-probe.json", &text);
+                eprintln!("[web-sync] PROBE: dumped {} bytes to /tmp/lovcode-web-probe.json", text.len());
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if let Some(obj) = v.as_object() {
+                        let keys: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
+                        eprintln!("[web-sync] PROBE: top keys = {:?}", keys);
+                        if let Some(cm) = obj.get("chat_messages").and_then(|v| v.as_array()) {
+                            eprintln!("[web-sync] PROBE: chat_messages.len = {}", cm.len());
+                        } else {
+                            eprintln!("[web-sync] PROBE: NO chat_messages field");
+                        }
+                    }
+                }
+            }
+            Ok(r) => eprintln!("[web-sync] PROBE: HTTP {}", r.status()),
+            Err(e) => eprintln!("[web-sync] PROBE: send err: {}", e),
+        }
+    }
+
+    // 5. Prepare project dir
+    let project_id = "-claude-ai".to_string();
+    let project_dir = get_claude_dir().join("projects").join(&project_id);
+    std::fs::create_dir_all(&project_dir).map_err(|e| e.to_string())?;
+    if !project_dir.join(".display_name").exists() {
+        let _ = std::fs::write(project_dir.join(".display_name"), "claude.ai");
+    }
+
+    // 6. Build the list of conversations that need fetching (skip fresh ones)
+    let total = conv_list.len();
+    let mut to_fetch: Vec<(String, String)> = Vec::new(); // (uuid, updated_at)
+    let mut skipped = 0usize;
+    for conv in &conv_list {
+        let Some(uuid) = conv.get("uuid").and_then(|v| v.as_str()) else { continue };
+        let updated_at = conv.get("updated_at").and_then(|v| v.as_str()).unwrap_or("");
+        let session_file = project_dir.join(format!("{}.jsonl", uuid));
+        if is_local_fresh_for_remote(&session_file, updated_at) {
+            skipped += 1;
+            continue;
+        }
+        to_fetch.push((uuid.to_string(), updated_at.to_string()));
+    }
+
+    let _ = app_handle.emit("web-sync-progress", WebSyncProgress {
+        total, processed: skipped, fetched: 0, skipped, failed: 0,
+    });
+    eprintln!("[web-sync] {} to fetch ({} skipped fresh)", to_fetch.len(), skipped);
+
+    // 7. Fetch concurrently with bounded parallelism. claude.ai usually tolerates
+    // a handful of in-flight detail requests; 6 keeps us well clear of rate limits
+    // while finishing 300+ conversations in minutes instead of hours.
+    use futures::stream::StreamExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let fetched_counter = std::sync::Arc::new(AtomicUsize::new(0));
+    let failed_counter = std::sync::Arc::new(AtomicUsize::new(0));
+    let processed_counter = std::sync::Arc::new(AtomicUsize::new(skipped));
+    let project_dir = std::sync::Arc::new(project_dir);
+    let cookie_header = std::sync::Arc::new(cookie_header);
+    let org_id = std::sync::Arc::new(org_id);
+    let client = std::sync::Arc::new(client);
+    let app_handle = std::sync::Arc::new(app_handle);
+
+    const CONCURRENCY: usize = 6;
+    let mut stream = futures::stream::iter(to_fetch.into_iter().map(|(uuid, updated_at)| {
+        let client = client.clone();
+        let cookie_header = cookie_header.clone();
+        let org_id = org_id.clone();
+        let project_dir = project_dir.clone();
+        let fetched = fetched_counter.clone();
+        let failed = failed_counter.clone();
+        let processed = processed_counter.clone();
+        let app_handle = app_handle.clone();
+        async move {
+            let session_file = project_dir.join(format!("{}.jsonl", uuid));
+            let detail_url = format!(
+                "https://claude.ai/api/organizations/{}/chat_conversations/{}?rendering_mode=raw",
+                org_id, uuid,
+            );
+            let result: Result<(), String> = (async {
+                let resp = client.get(&detail_url)
+                    .header(reqwest::header::COOKIE, cookie_header.as_str())
+                    .send().await.map_err(|e| format!("send: {}", e))?;
+                if !resp.status().is_success() {
+                    return Err(format!("HTTP {}", resp.status()));
+                }
+                let detail_value: serde_json::Value = resp.json().await
+                    .map_err(|e| format!("parse: {}", e))?;
+
+                // DEBUG: dump the very first response to a temp file so we can
+                // inspect the actual schema of the detail endpoint.
+                let dump_path = std::env::temp_dir().join("lovcode-web-detail-sample.json");
+                if !dump_path.exists() {
+                    let _ = std::fs::write(&dump_path, serde_json::to_string_pretty(&detail_value).unwrap_or_default());
+                    eprintln!("[web-sync] dumped sample to {}", dump_path.display());
+                }
+
+                let conv_struct: ClaudeWebConversation = serde_json::from_value(detail_value.clone())
+                    .map_err(|e| format!("struct: {}", e))?;
+                if conv_struct.chat_messages.is_empty() {
+                    let top_keys: Vec<&str> = detail_value.as_object()
+                        .map(|m| m.keys().map(|s| s.as_str()).collect()).unwrap_or_default();
+                    eprintln!("[web-sync] {} has empty chat_messages; top keys = {:?}", uuid, top_keys);
+                    return Ok(()); // empty — counted as success no-op
+                }
+                let jsonl = convert_conversation_to_jsonl(&conv_struct);
+                if jsonl.is_empty() {
+                    return Err("empty jsonl after conversion".to_string());
+                }
+                std::fs::write(&session_file, &jsonl).map_err(|e| format!("write: {}", e))?;
+                if let Ok(t) = chrono::DateTime::parse_from_rfc3339(&updated_at) {
+                    let ft = filetime::FileTime::from_unix_time(t.timestamp(), 0);
+                    let _ = filetime::set_file_mtime(&session_file, ft);
+                }
+                Ok(())
+            }).await;
+
+            match result {
+                Ok(()) => { fetched.fetch_add(1, Ordering::Relaxed); }
+                Err(e) => { eprintln!("[web-sync] {} failed: {}", uuid, e); failed.fetch_add(1, Ordering::Relaxed); }
+            }
+            let p = processed.fetch_add(1, Ordering::Relaxed) + 1;
+            if p % 5 == 0 || p == total {
+                let _ = app_handle.emit("web-sync-progress", WebSyncProgress {
+                    total,
+                    processed: p,
+                    fetched: fetched.load(Ordering::Relaxed),
+                    skipped,
+                    failed: failed.load(Ordering::Relaxed),
+                });
+            }
+        }
+    })).buffer_unordered(CONCURRENCY);
+
+    while stream.next().await.is_some() {}
+
+    let fetched = fetched_counter.load(Ordering::Relaxed);
+    let failed = failed_counter.load(Ordering::Relaxed);
+    eprintln!("[web-sync] done: fetched={} skipped={} failed={}", fetched, skipped, failed);
+    let _ = app_handle.emit("web-sync-progress", WebSyncProgress {
+        total, processed: total, fetched, skipped, failed,
+    });
+
+    Ok(WebSyncResult { fetched, skipped_unchanged: skipped, failed, project_id })
+}
+
+/// Debug command: fetch the raw API response for a single conversation and
+/// dump it to /tmp/lovcode-web-probe.json. Use to inspect the real schema.
+#[tauri::command]
+async fn debug_probe_claude_web(uuid: String) -> Result<String, String> {
+    let cookies = tauri::async_runtime::spawn_blocking(claude_web_sync::read_claude_app_cookies)
+        .await
+        .map_err(|e| e.to_string())??;
+    let session_key = cookies.get("sessionKey")
+        .ok_or_else(|| "no sessionKey".to_string())?.clone();
+    let active_org = cookies.get("lastActiveOrg").cloned();
+
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let cookie_header = format!("sessionKey={}", session_key);
+
+    let org_id = active_org.ok_or_else(|| "no lastActiveOrg cookie".to_string())?;
+
+    // Try multiple endpoint variants
+    let urls = vec![
+        format!("https://claude.ai/api/organizations/{}/chat_conversations/{}", org_id, uuid),
+        format!("https://claude.ai/api/organizations/{}/chat_conversations/{}?rendering_mode=raw", org_id, uuid),
+        format!("https://claude.ai/api/organizations/{}/chat_conversations/{}?tree=True&rendering_mode=raw", org_id, uuid),
+        format!("https://claude.ai/api/organizations/{}/chat_conversations/{}?tree=False&rendering_mode=raw", org_id, uuid),
+    ];
+
+    let mut report = String::new();
+    for (i, url) in urls.iter().enumerate() {
+        report.push_str(&format!("\n=== variant {}: {} ===\n", i, url));
+        let resp = match client.get(url).header(reqwest::header::COOKIE, &cookie_header).send().await {
+            Ok(r) => r,
+            Err(e) => { report.push_str(&format!("send err: {}\n", e)); continue; }
+        };
+        let status = resp.status();
+        report.push_str(&format!("status: {}\n", status));
+        let text = resp.text().await.unwrap_or_default();
+        report.push_str(&format!("body len: {} bytes\n", text.len()));
+
+        // Save first variant's body fully for schema inspection
+        if i == 0 {
+            let _ = std::fs::write("/tmp/lovcode-web-probe.json", &text);
+        }
+
+        // Try to parse + count chat_messages
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(obj) = v.as_object() {
+                let keys: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
+                report.push_str(&format!("top keys: {:?}\n", keys));
+                if let Some(cm) = obj.get("chat_messages").and_then(|v| v.as_array()) {
+                    report.push_str(&format!("chat_messages.len: {}\n", cm.len()));
+                    if let Some(first) = cm.first().and_then(|v| v.as_object()) {
+                        let mk: Vec<&str> = first.keys().map(|s| s.as_str()).collect();
+                        report.push_str(&format!("first message keys: {:?}\n", mk));
+                    }
+                }
+                // Also look for alternative field names
+                for alt in &["messages", "current_leaf_message", "chat_messages_leaf", "tree"] {
+                    if obj.contains_key(*alt) {
+                        report.push_str(&format!("HAS field [{}]\n", alt));
+                    }
+                }
+            }
+        } else {
+            report.push_str(&format!("non-JSON body head: {:?}\n", text.chars().take(200).collect::<String>()));
+        }
+    }
+
+    let _ = std::fs::write("/tmp/lovcode-web-probe-report.txt", &report);
+    Ok(report)
+}
+
+fn is_local_fresh_for_remote(path: &std::path::Path, remote_updated_at: &str) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else { return false };
+    let Ok(local_mtime) = meta.modified() else { return false };
+    let Ok(remote_dt) = chrono::DateTime::parse_from_rfc3339(remote_updated_at) else { return false };
+    let local_secs = local_mtime
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    local_secs >= remote_dt.timestamp()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -8021,6 +8724,19 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder, PredefinedMenuItem};
+
+            // dev 模式：cargo 重启二进制后默认抢焦点。`[NSApp hide:]` 让自己
+            // 在 active 之前先隐藏一次 —— macOS 会立刻把焦点交还给上一个
+            // frontmost app（通常是触发 cargo 的终端）。窗口随后正常显示，
+            // Dock 图标和 cmd-tab 列表都保留。release 构建零影响。
+            #[cfg(all(debug_assertions, target_os = "macos"))]
+            unsafe {
+                use cocoa::appkit::NSApp;
+                use cocoa::base::nil;
+                use objc::*;
+                let ns_app = NSApp();
+                let _: () = msg_send![ns_app, hide: nil];
+            }
 
             // Initialize PTY manager with app handle for event emission
             pty_manager::init(app.handle().clone());
@@ -8203,6 +8919,7 @@ pub fn run() {
             list_sessions,
             get_sessions_usage,
             list_all_sessions,
+            get_app_starred_session_ids,
             list_all_chats,
             get_session_messages,
             build_search_index,
@@ -8364,7 +9081,9 @@ pub fn run() {
             diagnostics_add_missing_keys,
             diagnostics_scan_file_lines,
             // Claude.ai web import
-            import_claude_web_data
+            import_claude_web_data,
+            sync_claude_web_conversations,
+            debug_probe_claude_web
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -20,6 +20,10 @@ export const sidebarViewModeAtom = atomWithStorage<SidebarViewMode>("lovcode:sid
 export const archivedSessionIdsAtom = atomWithStorage<string[]>("lovcode:sidebar:archivedSessionIds", []);
 export const showArchivedSessionsAtom = atomWithStorage("lovcode:sidebar:showArchived", false);
 
+// Pinned sessions (sticky to top in lists). Compatible with Claude app's pin concept
+// but stored locally — Claude app does not expose pin state in claude-code-sessions JSON.
+export const pinnedSessionIdsAtom = atomWithStorage<string[]>("lovcode:sidebar:pinnedSessionIds", []);
+
 // ProjectList
 export const chatViewModeAtom = atomWithStorage<"projects" | "sessions" | "chats">("lovcode:chatViewMode", "projects");
 export const allProjectsSortByAtom = atomWithStorage<"name" | "recent" | "sessions">("lovcode:allProjects:sortBy", "recent");

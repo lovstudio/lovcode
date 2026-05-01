@@ -1,6 +1,6 @@
 import { useAtom } from "jotai";
 import { invoke } from "@tauri-apps/api/core";
-import { FolderOpen, Copy, Download, Terminal, Archive, ArchiveRestore } from "lucide-react";
+import { FolderOpen, Copy, Download, Terminal, Archive, ArchiveRestore, Pin, PinOff } from "lucide-react";
 import { ExternalLinkIcon, ChatBubbleIcon } from "@radix-ui/react-icons";
 import {
   DropdownMenuItem,
@@ -12,7 +12,7 @@ import {
   ContextMenuCheckboxItem,
   ContextMenuSeparator,
 } from "@/components/ui/context-menu";
-import { archivedSessionIdsAtom } from "@/store";
+import { archivedSessionIdsAtom, pinnedSessionIdsAtom } from "@/store";
 
 export interface SessionMenuConfig {
   projectId: string;
@@ -60,6 +60,20 @@ export function useSessionArchive(sessionId: string) {
   return { isArchived, toggleArchived };
 }
 
+// Pin state for a session (client-side, sticky-to-top in lists).
+// Stored in localStorage — Claude app's pin state lives in its IndexedDB and
+// is not externally readable, so we keep this independent.
+export function useSessionPin(sessionId: string) {
+  const [pinnedIds, setPinnedIds] = useAtom(pinnedSessionIdsAtom);
+  const isPinned = pinnedIds.includes(sessionId);
+  const togglePinned = () => {
+    setPinnedIds((prev) =>
+      prev.includes(sessionId) ? prev.filter((id) => id !== sessionId) : [...prev, sessionId]
+    );
+  };
+  return { isPinned, togglePinned };
+}
+
 // DropdownMenu items
 export function SessionDropdownMenuItems({
   projectId,
@@ -77,9 +91,15 @@ export function SessionDropdownMenuItems({
   const { handleReveal, handleOpenInEditor, handleCopyPath, handleCopySessionId, handleCopyResumeCommand } =
     useSessionMenuHandlers(projectId, sessionId);
   const { isArchived, toggleArchived } = useSessionArchive(sessionId);
+  const { isPinned, togglePinned } = useSessionPin(sessionId);
 
   return (
     <>
+      <DropdownMenuItem onClick={togglePinned} className="gap-2">
+        {isPinned ? <PinOff size={14} /> : <Pin size={14} />}
+        {isPinned ? "Unpin" : "Pin to top"}
+      </DropdownMenuItem>
+      <DropdownMenuSeparator />
       <DropdownMenuItem onClick={handleCopySessionId} className="gap-2">
         <Copy size={14} />
         Copy Session ID
@@ -164,9 +184,15 @@ export function SessionContextMenuItems({
   const { handleReveal, handleOpenInEditor, handleCopyPath, handleCopySessionId, handleCopyResumeCommand } =
     useSessionMenuHandlers(projectId, sessionId);
   const { isArchived, toggleArchived } = useSessionArchive(sessionId);
+  const { isPinned, togglePinned } = useSessionPin(sessionId);
 
   return (
     <>
+      <ContextMenuItem onClick={togglePinned} className="gap-2">
+        {isPinned ? <PinOff size={14} /> : <Pin size={14} />}
+        {isPinned ? "Unpin" : "Pin to top"}
+      </ContextMenuItem>
+      <ContextMenuSeparator />
       <ContextMenuItem onClick={handleCopySessionId} className="gap-2">
         <Copy size={14} />
         Copy Session ID

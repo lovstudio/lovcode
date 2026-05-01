@@ -42,8 +42,15 @@ filetime = "0.2"
 libc = "0.2.179"
 tauri-plugin-updater = { version = "2", features = ["rustls-tls"] }
 tauri-plugin-process = "2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+futures = "0.3"
+aes = "0.8"
+cbc = { version = "0.1", features = ["std"] }
+pbkdf2 = "0.12"
+sha1 = "0.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.26"
 objc = "0.2"
+security-framework = "3"
 
