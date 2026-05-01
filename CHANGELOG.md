@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.26.0
+
+### Minor Changes
+
+- Sidebar 重构：Pinned / Recent / Import 三组结构 + Algolia 风格 ⌘K 搜索；live sync claude.ai web 聊天记录（Cookies+Keychain 解密 → API 拉取）；Pinned 三态 toggle 与 Claude desktop app starredIds 镜像；SessionItemButton 三点菜单 + 左侧 circle bullet；GlobalHeader 顶 nav 调整 Chat 为第一项；ActivityCard 复用到 Chat 空状态。
+
 ## 0.25.1
 
 ### Patch Changes
