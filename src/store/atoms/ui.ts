@@ -38,7 +38,7 @@ function parseUrlToView(hash: string): View {
   const path = hash.startsWith("/") ? hash.slice(1) : hash;
   const segments = path.split("/").filter(Boolean);
 
-  if (segments.length === 0) return { type: "home" };
+  if (segments.length === 0) return { type: "chat-projects" };
 
   const [first, second] = segments;
 

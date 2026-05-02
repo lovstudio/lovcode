@@ -1,5 +1,8 @@
 import { useState, useLayoutEffect, useRef, useMemo } from "react";
 import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { warmAcademicTheme } from "../../lib/codeTheme";
 import { HighlightText } from "./HighlightText";
 
 interface CollapsibleContentProps {
@@ -93,8 +96,42 @@ export function CollapsibleContent({ content, markdown, defaultCollapsed = false
         className={`text-ink text-sm leading-relaxed ${collapsed ? "overflow-hidden max-h-10" : ""}`}
       >
         {markdown ? (
-          <div className="prose prose-sm max-w-none prose-p:my-1 prose-headings:my-2 prose-pre:my-2 prose-ul:my-1 prose-ol:my-1">
-            <Markdown rehypePlugins={rehypePlugins as never}>{content}</Markdown>
+          <div className="prose prose-sm max-w-none prose-p:my-1 prose-headings:my-2 prose-pre:my-0 prose-ul:my-1 prose-ol:my-1 prose-table:my-0 prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1 prose-th:border prose-td:border prose-th:border-border prose-td:border-border prose-table:border-collapse prose-code:before:hidden prose-code:after:hidden">
+            <Markdown
+              remarkPlugins={[remarkGfm]}
+              rehypePlugins={rehypePlugins as never}
+              components={{
+                table: ({ node: _node, ...props }) => (
+                  <div className="my-2 overflow-x-auto">
+                    <table {...props} />
+                  </div>
+                ),
+                code: ({ node: _node, inline, className, children, ...props }: { node?: unknown; inline?: boolean; className?: string; children?: React.ReactNode }) => {
+                  const match = /language-(\w+)/.exec(className || "");
+                  if (!inline && match) {
+                    return (
+                      <div className="my-2 rounded-md overflow-hidden border border-border">
+                        <SyntaxHighlighter
+                          style={warmAcademicTheme}
+                          language={match[1]}
+                          PreTag="div"
+                          customStyle={{ margin: 0, borderRadius: 0, padding: "0.75rem 1rem", background: "#F0EEE6" }}
+                        >
+                          {String(children).replace(/\n$/, "")}
+                        </SyntaxHighlighter>
+                      </div>
+                    );
+                  }
+                  return (
+                    <code className={`${className || ""} px-1 py-0.5 rounded bg-card-alt text-ink/90 font-mono text-[0.85em]`} {...props}>
+                      {children}
+                    </code>
+                  );
+                },
+              }}
+            >
+              {content}
+            </Markdown>
           </div>
         ) : (
           <p className="whitespace-pre-wrap break-words">

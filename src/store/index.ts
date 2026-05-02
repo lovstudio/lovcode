@@ -9,7 +9,7 @@ export { expandedPathsAtom } from "./atoms/fileTree";
 
 // Chat atoms
 export {
-  originalChatAtom, markdownPreviewAtom,
+  originalChatAtom, markdownPreviewAtom, expandMessagesAtom,
   sessionContextTabAtom, sessionSelectModeAtom, hideEmptySessionsAtom, userPromptsOnlyAtom,
   chatViewModeAtom, allProjectsSortByAtom, hideEmptySessionsAllAtom,
   sidebarSessionSortByAtom, type SessionSortBy,

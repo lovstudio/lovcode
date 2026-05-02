@@ -90,7 +90,7 @@ export function GlobalHeader({
             isActive={primaryFeature === "chat"}
             onClick={() => handleMainNavClick("chat")}
             icon={<CounterClockwiseClockIcon className="w-4 h-4" />}
-            label="Chat"
+            label="History"
           />
           <NavButton
             isActive={primaryFeature === "workspace"}

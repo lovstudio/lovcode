@@ -3,6 +3,7 @@ import { atomWithStorage } from "jotai/utils";
 // MessageView
 export const originalChatAtom = atomWithStorage("lovcode:originalChat", true);
 export const markdownPreviewAtom = atomWithStorage("lovcode:markdownPreview", false);
+export const expandMessagesAtom = atomWithStorage("lovcode:expandMessages", true);
 
 // SessionList
 export const sessionContextTabAtom = atomWithStorage<"global" | "project">("lovcode:sessions:contextTab", "project");

@@ -4,61 +4,7 @@ import { docReaderCollapsedGroupsAtom } from "../store";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import type { CSSProperties } from "react";
-
-// Warm Academic code theme - matches design system
-const warmAcademicTheme: { [key: string]: CSSProperties } = {
-  'code[class*="language-"]': {
-    color: "#181818",
-    background: "none",
-    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-    fontSize: "0.875rem",
-    textAlign: "left",
-    whiteSpace: "pre",
-    wordSpacing: "normal",
-    wordBreak: "normal",
-    wordWrap: "normal",
-    lineHeight: "1.6",
-  },
-  'pre[class*="language-"]': {
-    color: "#181818",
-    background: "#F0EEE6",
-    padding: "1rem",
-    margin: "0",
-    overflow: "auto",
-  },
-  comment: { color: "#87867F", fontStyle: "italic" },
-  prolog: { color: "#87867F" },
-  doctype: { color: "#87867F" },
-  cdata: { color: "#87867F" },
-  punctuation: { color: "#5C5C5C" },
-  property: { color: "#CC785C" },
-  tag: { color: "#CC785C" },
-  boolean: { color: "#CC785C" },
-  number: { color: "#CC785C" },
-  constant: { color: "#CC785C" },
-  symbol: { color: "#CC785C" },
-  deleted: { color: "#CC785C" },
-  selector: { color: "#6B7F59" },
-  "attr-name": { color: "#6B7F59" },
-  string: { color: "#6B7F59" },
-  char: { color: "#6B7F59" },
-  builtin: { color: "#6B7F59" },
-  inserted: { color: "#6B7F59" },
-  operator: { color: "#87867F" },
-  entity: { color: "#87867F", cursor: "help" },
-  url: { color: "#87867F" },
-  ".language-css .token.string": { color: "#87867F" },
-  ".style .token.string": { color: "#87867F" },
-  atrule: { color: "#7D6B99" },
-  "attr-value": { color: "#7D6B99" },
-  keyword: { color: "#7D6B99" },
-  function: { color: "#4A6785" },
-  "class-name": { color: "#4A6785" },
-  regex: { color: "#CC785C" },
-  important: { color: "#CC785C", fontWeight: "bold" },
-  variable: { color: "#CC785C" },
-};
+import { warmAcademicTheme } from "../lib/codeTheme";
 // Lucide icons (no Radix equivalent)
 import { PanelLeftClose, PanelLeft, PanelRightClose, PanelRight, Maximize2, Minimize2 } from "lucide-react";
 // Radix icons
