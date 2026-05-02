@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.28.0
+
+### Minor Changes
+
+- Chat session detail upgrades:
+
+  - 会话详情底栏新增 provider / model / context window 占用展示（peak 单回合 input + cache 总和），后端新增 `get_session_usage` 按需读取真实用量
+  - "messages" 计数改为 "rounds"（仅统计用户 prompt，剔除工具调用与 meta）
+  - Markdown 链接 `[text](path)` 接入智能路径解析：命中本地文件时渲染 PathLink（存在性检查 + 右键菜单），外链走原系统打开
+  - 路由刷新后恢复上次所在页面，不再强制跳回 Dashboard
+  - 代码块 / 链接渲染细节修复（去除双层 border、prose-pre 背景透明化）
+
 ## 0.27.0
 
 ### Minor Changes
