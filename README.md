@@ -35,14 +35,15 @@
 
 ## Release Highlights
 
-### v0.27.0 — Chat Experience Upgrades
+### v0.28.0 — Smart Paths & Live Context Window
 
-Granular data sources, in-place reply, GFM tables, and Warm-Academic syntax-highlighted code blocks in chat.
+Markdown link path resolution with existence checks, plus a live provider / model / context-window readout in session detail.
 
 <img src="docs/images/claude-ai-import.png" alt="Claude.ai Import" width="100%">
 
 | Version | Highlights |
 |---------|------------|
+| **0.28.0** | Session detail footer shows provider · model · peak context-window occupancy (input + cache aggregate); `messages` count switched to `rounds` (user prompts only); markdown `[text](path)` links resolve through smart PathLink (existence-checked + context menu); router restores last page on reload instead of forcing Dashboard |
 | **0.27.0** | Data source split into `cli` / `app-code` / `app-web` / `app-cowork` with two-level tabs; bottom inline input to continue a session; merge consecutive same-role messages; GFM tables + code-block syntax highlighting in chat |
 | **0.26.0** | Sidebar refactor — Pinned / Recent / Import groups + Algolia-style ⌘K search; live sync of claude.ai web chats (Cookies + Keychain decrypt → API pull); Pinned tri-state toggle mirrored to Claude desktop `starredIds` |
 | **0.25.0** | MaaS provider registry (`/settings/maas`) with 4 Tauri commands; new `/events` page; LLM provider presets extracted; standalone Home consolidated into Workspace |
@@ -65,6 +66,8 @@ Granular data sources, in-place reply, GFM tables, and Warm-Academic syntax-high
 - **Live claude.ai Sync** — Pull web conversations directly via decrypted cookies (no manual export needed); also supports `.zip` / directory import
 - **Continue From the Bottom** — Reply to a session inline without leaving the detail view
 - **Rich Markdown Rendering** — GFM tables and syntax-highlighted code blocks (Warm Academic theme) inside chat messages
+- **Smart Path Links** — Bare paths *and* markdown `[text](path)` links are existence-checked against the session `cwd`; matches open in editor / Finder via right-click menu
+- **Live Context-Window Readout** — Session detail footer shows the active model, provider, and peak context-window occupancy (input + cache_read + cache_creation) per round
 - **Structured Content Blocks** — Tool calls, thinking, and tool results rendered as first-class blocks
 - **Sidebar with Pinned / Recent / Import** — Tri-state Pinned toggle mirrored to Claude desktop `starredIds`; Algolia-style ⌘K search
 - **MaaS Registry** — Manage custom Model-as-a-Service providers persistently (`/settings/maas`)
