@@ -99,6 +99,13 @@ export default function RootLayout() {
   }, []);
 
   useEffect(() => {
+    const path = location.pathname + location.search;
+    if (path && path !== "/") {
+      try { localStorage.setItem("lovcode:lastPath", path); } catch {}
+    }
+  }, [location.pathname, location.search]);
+
+  useEffect(() => {
     const unlisten = listen("menu-settings", () => setShowSettings(true));
     return () => { unlisten.then(fn => fn()); };
   }, []);
