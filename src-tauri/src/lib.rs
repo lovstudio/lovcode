@@ -172,6 +172,15 @@ pub struct SessionUsage {
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
     pub cost_usd: f64, // estimated cost in USD
+    /// Last model identifier seen in the session (e.g. "claude-opus-4-7"). Populated from
+    /// assistant message metadata; None for older sessions or non-Claude sources.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Peak total input footprint across any single assistant turn — best proxy for "context
+    /// window occupancy" since each turn ships the full live transcript. = input + cache_read +
+    /// cache_creation tokens at that turn. 0 when unknown.
+    #[serde(default)]
+    pub context_tokens: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -268,6 +277,7 @@ struct RawMessage {
     role: Option<String>,
     content: Option<serde_json::Value>,
     usage: Option<RawUsage>,
+    model: Option<String>,
 }
 
 /// Entry from history.jsonl - used as fast session index
@@ -768,10 +778,20 @@ fn read_session_usage(path: &Path) -> SessionUsage {
             if is_assistant {
                 if let Some(msg) = &parsed.message {
                     if let Some(u) = &msg.usage {
-                        usage.input_tokens += u.input_tokens.unwrap_or(0);
+                        let inp = u.input_tokens.unwrap_or(0);
+                        let cw = u.cache_creation_input_tokens.unwrap_or(0);
+                        let cr = u.cache_read_input_tokens.unwrap_or(0);
+                        usage.input_tokens += inp;
                         usage.output_tokens += u.output_tokens.unwrap_or(0);
-                        usage.cache_creation_tokens += u.cache_creation_input_tokens.unwrap_or(0);
-                        usage.cache_read_tokens += u.cache_read_input_tokens.unwrap_or(0);
+                        usage.cache_creation_tokens += cw;
+                        usage.cache_read_tokens += cr;
+                        let turn_ctx = inp + cw + cr;
+                        if turn_ctx > usage.context_tokens {
+                            usage.context_tokens = turn_ctx;
+                        }
+                    }
+                    if let Some(m) = msg.model.as_ref().filter(|s| !s.is_empty()) {
+                        usage.model = Some(m.clone());
                     }
                 }
             }
@@ -786,6 +806,22 @@ fn read_session_usage(path: &Path) -> SessionUsage {
 pub struct SessionUsageEntry {
     pub session_id: String,
     pub usage: SessionUsage,
+}
+
+#[tauri::command]
+async fn get_session_usage(project_id: String, session_id: String) -> Result<SessionUsage, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = get_claude_dir()
+            .join("projects")
+            .join(&project_id)
+            .join(format!("{}.jsonl", session_id));
+        if !path.exists() {
+            return Err("Session not found".to_string());
+        }
+        Ok(read_session_usage(&path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -9282,6 +9318,7 @@ pub fn run() {
             list_projects,
             list_sessions,
             get_sessions_usage,
+            get_session_usage,
             list_all_sessions,
             get_app_starred_session_ids,
             list_all_chats,

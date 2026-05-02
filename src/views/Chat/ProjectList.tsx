@@ -21,7 +21,7 @@ import {
   importCollapsedAtom,
 } from "../../store";
 import { useAppConfig } from "../../context";
-import { useReadableText } from "./utils";
+import { useReadableText, formatTokens, inferModelInfo } from "./utils";
 import { useInvokeQuery, useQueryClient } from "../../hooks";
 import { CollapsibleContent } from "./CollapsibleContent";
 import { ContentBlockRenderer } from "./ContentBlockRenderer";
@@ -1270,6 +1270,13 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
 
   const displaySummary = session.title || toReadable(session.summary) || "Untitled";
 
+  const { data: liveUsage } = useInvokeQuery<import("../../types").SessionUsage>(
+    ["session-usage", session.project_id, session.id],
+    "get_session_usage",
+    { projectId: session.project_id, sessionId: session.id },
+  );
+  const usage = liveUsage ?? session.usage;
+
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -1289,6 +1296,13 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
     if (userPromptsOnly) result = result.filter((m) => m.role === "user");
     return result;
   }, [messages, originalChat, userPromptsOnly]);
+
+  // A round = one user prompt (plus its following assistant turn). Count user messages from the
+  // chat-only view so meta/tool entries don't inflate the number.
+  const roundCount = useMemo(
+    () => messages.filter((m) => !m.is_meta && !m.is_tool && m.role === "user").length,
+    [messages],
+  );
 
   const handleCopyContent = (content: string) => {
     invoke("copy_to_clipboard", { text: content });
@@ -1432,9 +1446,7 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
           <p className="text-xs text-muted-foreground truncate">
             {session.project_path ? formatPath(session.project_path) : session.project_id}
             {" · "}
-            {userPromptsOnly
-              ? `${filteredMessages.length} prompts`
-              : `${session.message_count} messages`}
+            {`${roundCount} rounds`}
           </p>
         </div>
         <div className="flex items-center gap-3 shrink-0">
@@ -1646,9 +1658,30 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
                     ))}
                   </DropdownMenuContent>
                 </DropdownMenu>
-                <span className="text-[10px] text-muted-foreground font-mono truncate max-w-[60%]" title={session.project_path ?? undefined}>
-                  cwd: {session.project_path ? formatPath(session.project_path) : "—"}
-                </span>
+                {(() => {
+                  const info = inferModelInfo(usage?.model);
+                  const ctx = usage?.context_tokens ?? 0;
+                  if (!info && ctx === 0) return null;
+                  const pct = info?.contextWindow && ctx > 0 ? Math.min(100, Math.round((ctx / info.contextWindow) * 100)) : null;
+                  const parts = [
+                    info?.provider,
+                    info?.name,
+                    ctx > 0 ? `ctx ${formatTokens(ctx)}${pct !== null ? ` (${pct}%)` : ""}` : null,
+                  ].filter(Boolean) as string[];
+                  if (parts.length === 0) return null;
+                  return (
+                    <div
+                      className="text-[10px] text-muted-foreground font-mono truncate min-w-0"
+                      title={[
+                        info?.provider && `Provider: ${info.provider}`,
+                        info?.name && `Model: ${info.name}`,
+                        ctx > 0 && `Peak context: ${ctx.toLocaleString()} tokens${info?.contextWindow ? ` / ${info.contextWindow.toLocaleString()} (${pct}%)` : ""}`,
+                      ].filter(Boolean).join("\n")}
+                    >
+                      {parts.join(" · ")}
+                    </div>
+                  );
+                })()}
               </div>
             </div>
           )}

@@ -52,6 +52,8 @@ export interface SessionUsage {
   cache_creation_tokens: number;
   cache_read_tokens: number;
   cost_usd: number;
+  model?: string;
+  context_tokens: number;
 }
 
 export interface Session {
