@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { checkPaths, extractPathCandidates, type PathHit } from "./pathDetection";
+import { checkPaths, extractMarkdownLinkHrefs, extractPathCandidates, type PathHit } from "./pathDetection";
 
 function sameMap(a: Map<string, PathHit>, b: Map<string, PathHit>): boolean {
   if (a.size !== b.size) return false;
@@ -10,11 +10,15 @@ function sameMap(a: Map<string, PathHit>, b: Map<string, PathHit>): boolean {
   return true;
 }
 
-export function usePathHits(text: string, cwd?: string): Map<string, PathHit> {
+export function usePathHits(text: string, cwd?: string, includeMarkdownHrefs = false): Map<string, PathHit> {
   const [hits, setHits] = useState<Map<string, PathHit>>(new Map());
 
   useEffect(() => {
-    const candidates = extractPathCandidates(text);
+    const seen = new Set<string>(extractPathCandidates(text));
+    if (includeMarkdownHrefs) {
+      for (const h of extractMarkdownLinkHrefs(text)) seen.add(h);
+    }
+    const candidates = Array.from(seen);
     if (candidates.length === 0) {
       setHits((prev) => (prev.size === 0 ? prev : new Map()));
       return;
@@ -27,7 +31,7 @@ export function usePathHits(text: string, cwd?: string): Map<string, PathHit> {
     return () => {
       cancelled = true;
     };
-  }, [text, cwd]);
+  }, [text, cwd, includeMarkdownHrefs]);
 
   return hits;
 }

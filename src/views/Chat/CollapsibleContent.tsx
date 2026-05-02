@@ -134,7 +134,7 @@ export function CollapsibleContent({ content, markdown, defaultCollapsed = false
   const [isOverflow, setIsOverflow] = useState(false);
   const contentRef = useRef<HTMLDivElement>(null);
 
-  const pathHits = usePathHits(content, cwd);
+  const pathHits = usePathHits(content, cwd, markdown);
 
   const rehypePlugins = useMemo(() => {
     const plugins: unknown[] = [];
@@ -161,7 +161,7 @@ export function CollapsibleContent({ content, markdown, defaultCollapsed = false
         className={`text-ink text-sm leading-relaxed ${collapsed ? "overflow-hidden max-h-10" : ""}`}
       >
         {markdown ? (
-          <div className="prose prose-sm max-w-none prose-p:my-1 prose-headings:my-2 prose-pre:my-0 prose-ul:my-1 prose-ol:my-1 prose-table:my-0 prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1 prose-th:border prose-td:border prose-th:border-border prose-td:border-border prose-table:border-collapse prose-code:before:hidden prose-code:after:hidden">
+          <div className="prose prose-sm max-w-none prose-p:my-1 prose-headings:my-2 prose-pre:my-0 prose-pre:bg-transparent prose-pre:p-0 prose-pre:text-ink prose-ul:my-1 prose-ol:my-1 prose-table:my-0 prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1 prose-th:border prose-td:border prose-th:border-border prose-td:border-border prose-table:border-collapse prose-code:before:hidden prose-code:after:hidden">
             <Markdown
               remarkPlugins={[remarkGfm]}
               rehypePlugins={rehypePlugins as never}
@@ -175,43 +175,53 @@ export function CollapsibleContent({ content, markdown, defaultCollapsed = false
                   }
                   return <span {...props}>{children}</span>;
                 },
-                a: ({ node: _node, href, children, ...props }) => (
-                  <a
-                    {...props}
-                    href={href}
-                    onClick={(e) => {
-                      e.preventDefault();
-                      if (!href) return;
-                      // Treat anything that isn't a real URL (http/https/mailto/...), a fragment,
-                      // or a query as a local filesystem path. Bare relative hrefs like
-                      // "output/foo.md" come from markdown links and resolve against the session cwd.
-                      const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(href);
-                      const isFragment = href.startsWith("#") || href.startsWith("?");
-                      const isFileUrl = href.startsWith("file://");
-                      const isLocalPath = isFileUrl || (!hasScheme && !isFragment);
-
-                      if (isLocalPath) {
-                        let path = isFileUrl ? href.slice(7) : href;
-                        try { path = decodeURIComponent(path); } catch { /* keep raw on bad encoding */ }
-                        console.log("[link click]", { href, path, cwd });
-                        invoke("open_path", { path, cwd }).catch((err) => {
-                          console.error("[open_path failed]", err);
-                          const msg = typeof err === "string" ? err : err instanceof Error ? err.message : JSON.stringify(err);
-                          toast.error(`打开失败: ${msg}`);
-                        });
-                      } else {
-                        openUrl(href).catch((err) => {
-                          console.error("[openUrl failed]", err);
-                          const msg = typeof err === "string" ? err : err instanceof Error ? err.message : JSON.stringify(err);
-                          toast.error(`打开链接失败: ${msg}`);
-                        });
+                a: ({ node: _node, href, children, ...props }) => {
+                  // Local path link → route through smart PathLink (existence-checked, context menu).
+                  if (href) {
+                    const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(href);
+                    const isFragment = href.startsWith("#") || href.startsWith("?");
+                    const isFileUrl = href.startsWith("file://");
+                    if (isFileUrl || (!hasScheme && !isFragment)) {
+                      let key = isFileUrl ? href.slice(7) : href;
+                      try { key = decodeURIComponent(key); } catch { /* keep raw */ }
+                      const hit = pathHits.get(key);
+                      if (hit) {
+                        return <PathLink text={typeof children === "string" ? children : (Array.isArray(children) ? children.join("") : key)} hit={hit} />;
                       }
-                    }}
-                    className="text-primary underline underline-offset-2 hover:text-primary/80 cursor-pointer"
-                  >
-                    {children}
-                  </a>
-                ),
+                    }
+                  }
+                  // Fallback: external URL (or unresolved local path) → open via system.
+                  return (
+                    <a
+                      {...props}
+                      href={href}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        if (!href) return;
+                        const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(href);
+                        const isFragment = href.startsWith("#") || href.startsWith("?");
+                        const isFileUrl = href.startsWith("file://");
+                        const isLocalPath = isFileUrl || (!hasScheme && !isFragment);
+                        if (isLocalPath) {
+                          let path = isFileUrl ? href.slice(7) : href;
+                          try { path = decodeURIComponent(path); } catch { /* keep raw */ }
+                          invoke("open_path", { path, cwd }).catch((err) => {
+                            const msg = typeof err === "string" ? err : err instanceof Error ? err.message : JSON.stringify(err);
+                            toast.error(`打开失败: ${msg}`);
+                          });
+                        } else {
+                          openUrl(href).catch((err) => {
+                            const msg = typeof err === "string" ? err : err instanceof Error ? err.message : JSON.stringify(err);
+                            toast.error(`打开链接失败: ${msg}`);
+                          });
+                        }
+                      }}
+                      className="text-primary underline underline-offset-2 hover:text-primary/80 cursor-pointer"
+                    >
+                      {children}
+                    </a>
+                  );
+                },
                 table: ({ node: _node, ...props }) => (
                   <div className="my-2 overflow-x-auto">
                     <table {...props} />
@@ -221,12 +231,12 @@ export function CollapsibleContent({ content, markdown, defaultCollapsed = false
                   const match = /language-(\w+)/.exec(className || "");
                   if (!inline && match) {
                     return (
-                      <div className="my-2 rounded-md overflow-hidden border border-border">
+                      <div className="my-2 rounded-md overflow-hidden">
                         <SyntaxHighlighter
                           style={warmAcademicTheme}
                           language={match[1]}
                           PreTag="div"
-                          customStyle={{ margin: 0, borderRadius: 0, padding: "0.75rem 1rem", background: "#F0EEE6" }}
+                          customStyle={{ margin: 0, borderRadius: "0.375rem", padding: "0.75rem 1rem", background: "#F0EEE6" }}
                         >
                           {String(children).replace(/\n$/, "")}
                         </SyntaxHighlighter>

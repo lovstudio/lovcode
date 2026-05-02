@@ -37,6 +37,30 @@ export function extractPathCandidates(text: string): string[] {
   return Array.from(out);
 }
 
+// Extract hrefs from markdown link syntax `[text](href)` or `[text](<href>)` that look like local
+// filesystem paths. Used so smart-path resolution covers explicit markdown links — not just bare
+// path strings in prose. Skips URL schemes (http://, mailto:, etc.) and fragments/queries.
+const MD_LINK_RE = /\[(?:[^\]\\]|\\.)*\]\(\s*<?([^\s<>)]+)>?\s*(?:"[^"]*"|'[^']*'|\([^)]*\))?\s*\)/g;
+
+export function extractMarkdownLinkHrefs(text: string): string[] {
+  const out = new Set<string>();
+  let m: RegExpExecArray | null;
+  MD_LINK_RE.lastIndex = 0;
+  while ((m = MD_LINK_RE.exec(text)) !== null) {
+    let href = m[1];
+    if (!href) continue;
+    if (href.startsWith("#") || href.startsWith("?")) continue;
+    if (href.startsWith("file://")) {
+      href = href.slice(7);
+    } else if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(href)) {
+      continue;
+    }
+    try { href = decodeURIComponent(href); } catch { /* keep raw on bad encoding */ }
+    if (href.length >= 1) out.add(href);
+  }
+  return Array.from(out);
+}
+
 const cache = new Map<string, PathHit | null>();
 
 function cacheKey(raw: string, cwd: string | undefined): string {
