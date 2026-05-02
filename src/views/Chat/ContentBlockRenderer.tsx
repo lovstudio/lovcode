@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { CollapsibleContent } from "./CollapsibleContent";
+import { PathAwareText } from "./PathAwareText";
+import { usePathHits } from "./usePathHits";
 import type { ContentBlock } from "../../types";
 
 interface ContentBlockRendererProps {
@@ -7,6 +9,7 @@ interface ContentBlockRendererProps {
   markdown: boolean;
   highlight?: string;
   disableTextCollapse?: boolean;
+  cwd?: string;
 }
 
 const TOOL_COLORS: Record<string, string> = {
@@ -37,15 +40,16 @@ function ToolUseBadge({ name, summary }: { name: string; summary: string }) {
   );
 }
 
-function ToolResultBlock({ content }: { content: string }) {
+function ToolResultBlock({ content, cwd }: { content: string; cwd?: string }) {
   const [expanded, setExpanded] = useState(false);
   const isLong = content.length > 200;
   const display = !expanded && isLong ? content.slice(0, 200) + "..." : content;
+  const hits = usePathHits(display, cwd);
 
   return (
     <div className="border-l-2 border-border pl-3 py-1 my-1">
       <pre className="text-xs font-mono text-muted-foreground whitespace-pre-wrap break-words">
-        {display}
+        <PathAwareText text={display} hits={hits} />
       </pre>
       {isLong && (
         <button
@@ -81,17 +85,17 @@ function ThinkingBlock({ thinking }: { thinking: string }) {
   );
 }
 
-export function ContentBlockRenderer({ blocks, markdown, highlight, disableTextCollapse }: ContentBlockRendererProps) {
+export function ContentBlockRenderer({ blocks, markdown, highlight, disableTextCollapse, cwd }: ContentBlockRendererProps) {
   return (
     <div className="space-y-1">
       {blocks.map((block, i) => {
         switch (block.type) {
           case "text":
-            return <CollapsibleContent key={i} content={block.text} markdown={markdown} highlight={highlight} disableCollapse={disableTextCollapse} />;
+            return <CollapsibleContent key={i} content={block.text} markdown={markdown} highlight={highlight} disableCollapse={disableTextCollapse} cwd={cwd} />;
           case "tool_use":
             return <ToolUseBadge key={i} name={block.name} summary={block.summary} />;
           case "tool_result":
-            return <ToolResultBlock key={i} content={block.content} />;
+            return <ToolResultBlock key={i} content={block.content} cwd={cwd} />;
           case "thinking":
             return <ThinkingBlock key={i} thinking={block.thinking} />;
         }

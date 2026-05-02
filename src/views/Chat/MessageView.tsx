@@ -174,9 +174,9 @@ export function MessageView({ projectId, projectPath, sessionId, summary: initia
               </DropdownMenu>
               <p className="text-xs text-muted-foreground-foreground mb-2 uppercase tracking-wide">{msg.role}</p>
               {msg.content_blocks && !originalChat ? (
-                <ContentBlockRenderer blocks={msg.content_blocks} markdown={markdownPreview} />
+                <ContentBlockRenderer blocks={msg.content_blocks} markdown={markdownPreview} cwd={projectPath} />
               ) : (
-                <CollapsibleContent content={displayContent} markdown={markdownPreview} />
+                <CollapsibleContent content={displayContent} markdown={markdownPreview} cwd={projectPath} />
               )}
             </div>
           );

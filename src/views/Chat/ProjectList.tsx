@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ChevronDownIcon, ChevronRightIcon, DotsHorizontalIcon, ListBulletIcon, GroupIcon, MagnifyingGlassIcon, Cross2Icon, DesktopIcon } from "@radix-ui/react-icons";
-import { Copy, Upload, ChevronUp, ChevronDown, Pin, RefreshCw, CornerDownLeft } from "lucide-react";
+import { Copy, Upload, ChevronUp, ChevronDown, Pin, RefreshCw, CornerDownLeft, AlertTriangle } from "lucide-react";
 import { TerminalPane, disposeTerminal } from "../../components/Terminal";
 import { TERMINAL_OPTIONS, type TerminalOption } from "../../components/ui/new-terminal-button";
 import { useAtom } from "jotai";
@@ -26,6 +26,8 @@ import { useInvokeQuery, useQueryClient } from "../../hooks";
 import { CollapsibleContent } from "./CollapsibleContent";
 import { ContentBlockRenderer } from "./ContentBlockRenderer";
 import { HighlightText } from "./HighlightText";
+import { useCwdValidity } from "./useCwdValidity";
+import { RelocateSessionDialog } from "./RelocateSessionDialog";
 import { ProjectLogo } from "../Workspace/ProjectLogo";
 import { ActivityCard } from "../../components/home";
 import {
@@ -76,7 +78,15 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
   const [recentCollapsed, setRecentCollapsed] = useAtom(recentCollapsedAtom);
   const [importCollapsed, setImportCollapsed] = useAtom(importCollapsedAtom);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string> | null>(null);
-  const [selectedSession, setSelectedSession] = useState<Session | null>(null);
+  const [selectedSessionRaw, setSelectedSessionRaw] = useState<Session | null>(null);
+  // Always re-derive the selected session from the live `allSessions` array so that
+  // when cwd repair / migration moves a session to a new project slug, the right panel
+  // picks up the new object (with updated project_path / project_id) automatically.
+  const selectedSession: Session | null = useMemo(() => {
+    if (!selectedSessionRaw) return null;
+    return allSessions.find((s) => s.id === selectedSessionRaw.id) ?? selectedSessionRaw;
+  }, [selectedSessionRaw, allSessions]);
+  const setSelectedSession: typeof setSelectedSessionRaw = setSelectedSessionRaw;
   const [grouped, setGrouped] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
@@ -1021,6 +1031,8 @@ function SessionItemButton({
 }) {
   const titleText = session.title || toReadable(session.summary) || "Untitled";
   const projectName = session.project_path?.split("/").pop() ?? "";
+  const missingCwds = useCwdValidity([session.project_path]);
+  const cwdMissing = !!session.project_path && missingCwds.has(session.project_path);
   return (
     <div
       onClick={onClick}
@@ -1029,7 +1041,7 @@ function SessionItemButton({
         isSelected
           ? "bg-primary/10 text-ink"
           : "text-muted-foreground hover:text-ink hover:bg-card-alt"
-      }`}
+      } ${cwdMissing ? "opacity-60" : ""}`}
     >
       <span
         className={`shrink-0 inline-block w-1.5 h-1.5 rounded-full border ${
@@ -1049,6 +1061,11 @@ function SessionItemButton({
           </span>
         )}
       </div>
+      {cwdMissing && (
+        <span className="shrink-0" title={`cwd 已不存在: ${session.project_path}`}>
+          <AlertTriangle className="w-3 h-3 text-amber-600" />
+        </span>
+      )}
       <div className="flex items-center gap-1 shrink-0">
         <span className="text-[10px] text-muted-foreground tabular-nums group-hover:hidden">
           {session.message_count}
@@ -1118,6 +1135,7 @@ function MessageGroupCard({
   highlight,
   toReadable,
   onCopy,
+  cwd,
 }: {
   group: Message[];
   originalChat: boolean;
@@ -1126,6 +1144,7 @@ function MessageGroupCard({
   highlight?: string;
   toReadable: (s: string | null) => string;
   onCopy: (content: string) => void;
+  cwd?: string;
 }) {
   const groupContent = group.map((m) => toReadable(m.content)).join("\n\n");
   const firstTs = group[0].timestamp;
@@ -1163,9 +1182,9 @@ function MessageGroupCard({
                 className={idx > 0 ? "pt-1.5 border-t border-border/30" : ""}
               >
                 {msg.content_blocks && !originalChat ? (
-                  <ContentBlockRenderer blocks={msg.content_blocks} markdown={markdownPreview} highlight={highlight} disableTextCollapse />
+                  <ContentBlockRenderer blocks={msg.content_blocks} markdown={markdownPreview} highlight={highlight} disableTextCollapse cwd={cwd} />
                 ) : (
-                  <CollapsibleContent content={toReadable(msg.content)} markdown={markdownPreview} highlight={highlight} disableCollapse />
+                  <CollapsibleContent content={toReadable(msg.content)} markdown={markdownPreview} highlight={highlight} disableCollapse cwd={cwd} />
                 )}
               </div>
             ))}
@@ -1208,9 +1227,39 @@ function MessageGroupCard({
   );
 }
 
+function CwdMissingBanner({ from }: { from: string }) {
+  const [dialogOpen, setDialogOpen] = useState(false);
+
+  return (
+    <>
+      <div className="shrink-0 border-b border-amber-300/60 bg-amber-50 text-amber-900 px-4 py-2 text-xs">
+        <div className="flex items-start gap-2">
+          <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+          <div className="min-w-0 flex-1">
+            <div className="font-medium">原工作目录已不存在</div>
+            <div className="opacity-80 break-all font-mono">{from}</div>
+            <div className="opacity-70 mt-0.5">历史可正常查看，但其中的相对路径无法解析、resume 也会失败。可能是项目被移动或重命名。</div>
+          </div>
+        </div>
+        <div className="mt-2 pl-[22px]">
+          <button
+            onClick={() => setDialogOpen(true)}
+            className="px-2 py-1 rounded border border-amber-400 bg-white/60 hover:bg-white text-amber-900"
+          >
+            重定位…
+          </button>
+        </div>
+      </div>
+      <RelocateSessionDialog from={from} open={dialogOpen} onOpenChange={setDialogOpen} />
+    </>
+  );
+}
+
 function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Session; onClose: () => void; highlight?: string; scrollRef?: React.RefObject<HTMLDivElement | null> }) {
   const { formatPath } = useAppConfig();
   const toReadable = useReadableText();
+  const missingCwds = useCwdValidity([session.project_path]);
+  const cwdMissing = !!session.project_path && missingCwds.has(session.project_path);
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(true);
   const [originalChat, setOriginalChat] = useAtom(originalChatAtom);
@@ -1450,6 +1499,10 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
         </div>
       </header>
 
+      {cwdMissing && session.project_path && (
+        <CwdMissingBanner from={session.project_path} />
+      )}
+
       <div ref={scrollRef} className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden overscroll-contain">
       <div ref={contentRef}>
 
@@ -1475,6 +1528,7 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
               highlight={highlight}
               toReadable={toReadable}
               onCopy={handleCopyContent}
+              cwd={session.project_path ?? undefined}
             />
           ))}
         </div>

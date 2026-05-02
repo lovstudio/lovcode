@@ -5575,16 +5575,25 @@ fn reveal_session_file(project_id: String, session_id: String) -> Result<(), Str
 }
 
 #[tauri::command]
-fn reveal_path(path: String) -> Result<(), String> {
-    let expanded = if path.starts_with("~") {
+fn reveal_path(path: String, cwd: Option<String>) -> Result<(), String> {
+    let expanded = if path.starts_with("~/") || path == "~" {
         let home = dirs::home_dir().ok_or("Cannot get home dir")?;
-        home.join(&path[2..])
+        if path == "~" { home } else { home.join(&path[2..]) }
+    } else if path.starts_with('/') {
+        std::path::PathBuf::from(&path)
+    } else if let Some(base) = cwd.as_ref().filter(|s| !s.is_empty()) {
+        std::path::PathBuf::from(base).join(&path)
     } else {
         std::path::PathBuf::from(&path)
     };
 
     if !expanded.exists() {
-        return Err(format!("Path not found: {}", path));
+        return Err(format!(
+            "Path not found\n  input: {}\n  cwd:   {}\n  tried: {}",
+            path,
+            cwd.as_deref().unwrap_or("(none)"),
+            expanded.display()
+        ));
     }
 
     let path_str = expanded.to_string_lossy().to_string();
@@ -5614,16 +5623,25 @@ fn reveal_path(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn open_path(path: String) -> Result<(), String> {
-    let expanded = if path.starts_with("~") {
+fn open_path(path: String, cwd: Option<String>) -> Result<(), String> {
+    let expanded = if path.starts_with("~/") || path == "~" {
         let home = dirs::home_dir().ok_or("Cannot get home dir")?;
-        home.join(&path[2..])
+        if path == "~" { home } else { home.join(&path[2..]) }
+    } else if path.starts_with('/') {
+        std::path::PathBuf::from(&path)
+    } else if let Some(base) = cwd.as_ref().filter(|s| !s.is_empty()) {
+        std::path::PathBuf::from(base).join(&path)
     } else {
         std::path::PathBuf::from(&path)
     };
 
     if !expanded.exists() {
-        return Err(format!("Path not found: {}", path));
+        return Err(format!(
+            "Path not found\n  input: {}\n  cwd:   {}\n  tried: {}",
+            path,
+            cwd.as_deref().unwrap_or("(none)"),
+            expanded.display()
+        ));
     }
 
     let path_str = expanded.to_string_lossy().to_string();
@@ -5650,6 +5668,345 @@ fn open_path(path: String) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+struct PathCheckResult {
+    raw: String,
+    resolved: String,
+    is_dir: bool,
+}
+
+#[tauri::command]
+fn check_paths_exist(paths: Vec<String>, cwd: Option<String>) -> Vec<PathCheckResult> {
+    let home = dirs::home_dir();
+    let cwd_path = cwd.as_ref().map(std::path::PathBuf::from);
+
+    paths
+        .into_iter()
+        .filter_map(|raw| {
+            let trimmed = raw.trim().trim_end_matches([',', '.', ';', ':', ')', ']']);
+            if trimmed.is_empty() {
+                return None;
+            }
+
+            let candidate = if trimmed.starts_with("~/") || trimmed == "~" {
+                let home = home.as_ref()?;
+                if trimmed == "~" {
+                    home.clone()
+                } else {
+                    home.join(&trimmed[2..])
+                }
+            } else if trimmed.starts_with('/') {
+                std::path::PathBuf::from(trimmed)
+            } else if let Some(base) = &cwd_path {
+                base.join(trimmed)
+            } else {
+                return None;
+            };
+
+            let metadata = std::fs::metadata(&candidate).ok()?;
+            let canonical = std::fs::canonicalize(&candidate).unwrap_or(candidate);
+
+            Some(PathCheckResult {
+                raw,
+                resolved: canonical.to_string_lossy().to_string(),
+                is_dir: metadata.is_dir(),
+            })
+        })
+        .collect()
+}
+
+#[derive(Serialize)]
+struct RelocationCandidate {
+    /// Full reconstructed path that exists on disk (lost-root replacement + tail rejoin).
+    path: String,
+    /// Source classification for ranking + UI display.
+    source: String, // "spotlight" | "ancestor"
+    /// True if the WHOLE original path can be reconstructed at this candidate.
+    full_match: bool,
+}
+
+#[derive(Serialize)]
+struct RelocationResult {
+    /// The deepest ancestor of `from` that exists on disk (informational).
+    nearest_existing_ancestor: Option<String>,
+    /// The first segment whose parent exists but it doesn't — the "lost" leaf to search for.
+    lost_root: Option<String>,
+    /// Path tail BELOW lost_root (joined with `/`); empty if `lost_root` IS the original path.
+    tail: String,
+    /// Best-effort candidates, sorted by quality (full_match first, then source priority).
+    candidates: Vec<RelocationCandidate>,
+}
+
+/// Walk up `from`, returning (nearest_existing_ancestor, lost_root_path).
+/// `lost_root_path` is the last segment in the chain whose parent exists on disk.
+fn analyze_lost_path(from: &std::path::Path) -> (Option<std::path::PathBuf>, Option<std::path::PathBuf>) {
+    let mut lost_root: Option<std::path::PathBuf> = None;
+    let mut cur = from.to_path_buf();
+    loop {
+        if cur.exists() {
+            return (Some(cur), lost_root);
+        }
+        lost_root = Some(cur.clone());
+        match cur.parent() {
+            Some(p) if !p.as_os_str().is_empty() => cur = p.to_path_buf(),
+            _ => return (None, lost_root),
+        }
+    }
+}
+
+#[tauri::command]
+async fn find_relocation_candidates(from: String) -> Result<RelocationResult, String> {
+    if from.is_empty() {
+        return Err("from is required".into());
+    }
+    let from_path = std::path::PathBuf::from(&from);
+
+    let (nearest, lost_root_opt) = analyze_lost_path(&from_path);
+    let lost_root = match lost_root_opt {
+        Some(p) => p,
+        None => {
+            return Ok(RelocationResult {
+                nearest_existing_ancestor: nearest.map(|p| p.to_string_lossy().to_string()),
+                lost_root: None,
+                tail: String::new(),
+                candidates: Vec::new(),
+            });
+        }
+    };
+
+    // Tail = path components below lost_root (relative).
+    let tail: std::path::PathBuf = from_path
+        .strip_prefix(&lost_root)
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
+
+    let leaf_name = lost_root
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let mut candidates: Vec<RelocationCandidate> = Vec::new();
+
+    // Strategy: Spotlight (macOS) global search for the leaf folder name.
+    #[cfg(target_os = "macos")]
+    if !leaf_name.is_empty() {
+        let leaf_owned = leaf_name.clone();
+        let mdfind_out = tauri::async_runtime::spawn_blocking(move || {
+            std::process::Command::new("/usr/bin/mdfind")
+                .args([
+                    "-onlyin",
+                    "/Users",
+                    &format!("kMDItemFSName == \"{}\" && kMDItemContentType == \"public.folder\"", leaf_owned.replace('"', "\\\"")),
+                ])
+                .output()
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+
+        if mdfind_out.status.success() {
+            let stdout = String::from_utf8_lossy(&mdfind_out.stdout);
+            for line in stdout.lines().take(50) {
+                let cand_root = std::path::PathBuf::from(line.trim());
+                if !cand_root.is_dir() {
+                    continue;
+                }
+                if cand_root == lost_root {
+                    continue;
+                }
+                let full = cand_root.join(&tail);
+                let full_match = full.exists();
+                candidates.push(RelocationCandidate {
+                    path: if full_match {
+                        full.to_string_lossy().to_string()
+                    } else {
+                        cand_root.to_string_lossy().to_string()
+                    },
+                    source: "spotlight".into(),
+                    full_match,
+                });
+            }
+        }
+    }
+
+    // Sort: full matches first, then by path length (shorter = closer to home).
+    candidates.sort_by(|a, b| {
+        b.full_match
+            .cmp(&a.full_match)
+            .then_with(|| a.path.len().cmp(&b.path.len()))
+    });
+
+    // Dedupe by path
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|c| seen.insert(c.path.clone()));
+
+    Ok(RelocationResult {
+        nearest_existing_ancestor: nearest.map(|p| p.to_string_lossy().to_string()),
+        lost_root: Some(lost_root.to_string_lossy().to_string()),
+        tail: tail.to_string_lossy().to_string(),
+        candidates,
+    })
+}
+
+#[derive(Serialize)]
+struct MigrateCwdResult {
+    success: bool,
+    stdout: String,
+    stderr: String,
+    /// Parsed `migrated` count from cc-mv `--json` output if available.
+    migrated: Option<u64>,
+}
+
+/// Find a usable `npx` executable. Tauri-spawned children on macOS GUI apps don't
+/// inherit the login shell PATH, so absolute paths must be probed explicitly.
+fn find_npx() -> Option<String> {
+    if let Ok(p) = std::env::var("PATH") {
+        for dir in p.split(':') {
+            let candidate = std::path::PathBuf::from(dir).join("npx");
+            if candidate.exists() {
+                return Some(candidate.to_string_lossy().to_string());
+            }
+        }
+    }
+    for fallback in [
+        "/opt/homebrew/bin/npx",
+        "/usr/local/bin/npx",
+        "/usr/bin/npx",
+    ] {
+        if std::path::Path::new(fallback).exists() {
+            return Some(fallback.to_string());
+        }
+    }
+    None
+}
+
+/// Rewrite the `cwd` field in Claude desktop app's per-session local_*.json files
+/// for any session whose cwd has `from` as a prefix. Returns count of files updated.
+/// cc-mv only knows about ~/.claude/projects/*; this companion store is lovcode-specific.
+fn rewrite_app_session_cwds(from: &str, to: &str) -> Result<usize, String> {
+    let home = dirs::home_dir().ok_or_else(|| "no home dir".to_string())?;
+    let root = home
+        .join("Library")
+        .join("Application Support")
+        .join("Claude")
+        .join("claude-code-sessions");
+    if !root.exists() {
+        return Ok(0);
+    }
+
+    let mut updated = 0usize;
+
+    for device in fs::read_dir(&root).into_iter().flatten().flatten() {
+        for account in fs::read_dir(device.path()).into_iter().flatten().flatten() {
+            for entry in fs::read_dir(account.path()).into_iter().flatten().flatten() {
+                let path = entry.path();
+                let fname = path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if !fname.starts_with("local_") || !fname.ends_with(".json") {
+                    continue;
+                }
+                let content = match fs::read_to_string(&path) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                let mut value: serde_json::Value = match serde_json::from_str(&content) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let Some(cwd) = value.get("cwd").and_then(|v| v.as_str()).map(|s| s.to_string()) else {
+                    continue;
+                };
+                if cwd != from && !cwd.starts_with(&format!("{}/", from)) {
+                    continue;
+                }
+                let new_cwd = if cwd == from {
+                    to.to_string()
+                } else {
+                    format!("{}{}", to, &cwd[from.len()..])
+                };
+                value["cwd"] = serde_json::Value::String(new_cwd);
+                if let Ok(serialized) = serde_json::to_string_pretty(&value) {
+                    if fs::write(&path, serialized).is_ok() {
+                        updated += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(updated)
+}
+
+#[tauri::command]
+async fn migrate_session_cwd(from: String, to: String) -> Result<MigrateCwdResult, String> {
+    if from.is_empty() || to.is_empty() {
+        return Err("from and to are required".into());
+    }
+    let npx = find_npx().ok_or_else(|| {
+        "找不到 npx — 请确认 Node.js 已安装并在 PATH 中（/opt/homebrew/bin 或 /usr/local/bin）".to_string()
+    })?;
+
+    let from_clone = from.clone();
+    let to_clone = to.clone();
+    let npx_clone = npx.clone();
+
+    let output = tauri::async_runtime::spawn_blocking(move || {
+        std::process::Command::new(&npx_clone)
+            .args([
+                "-y",
+                "@lovstudio/cc-mv",
+                &from_clone,
+                &to_clone,
+                "--no-mv",
+                "--yes",
+                "--json",
+                // Repair scenario: old slug points to a non-existent dir, so keeping
+                // it as a safety net only causes duplicate session rows in the UI.
+                // We always rewrite — never move files — so this only deletes redundant
+                // jsonl copies under ~/.claude/projects/<old-slug>/.
+                "--delete-source",
+            ])
+            .output()
+    })
+    .await
+    .map_err(|e| format!("spawn join error: {}", e))?
+    .map_err(|e| format!("spawn cc-mv failed: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let success = output.status.success();
+
+    // cc-mv with --json prints a JSON object on stdout. Try to extract `migrated`.
+    let migrated = serde_json::from_str::<serde_json::Value>(stdout.trim())
+        .ok()
+        .and_then(|v| v.get("migrated").and_then(|x| x.as_u64()));
+
+    // After cc-mv succeeds, also rewrite the lovcode-side desktop-app session metadata
+    // (~/Library/Application Support/Claude/claude-code-sessions/**/local_*.json) which
+    // cc-mv doesn't know about. lovcode reads `cwd` from these files in list_all_sessions,
+    // so without this step the UI would still show the old path.
+    if success {
+        match rewrite_app_session_cwds(&from, &to) {
+            Ok(n) if n > 0 => {
+                stderr.push_str(&format!("\n[lovcode] rewrote cwd in {} app session metadata files", n));
+            }
+            Ok(_) => {}
+            Err(e) => {
+                stderr.push_str(&format!("\n[lovcode] failed to rewrite app session metadata: {}", e));
+            }
+        }
+    }
+
+    Ok(MigrateCwdResult {
+        success,
+        stdout,
+        stderr,
+        migrated,
+    })
 }
 
 #[tauri::command]
@@ -8975,6 +9332,9 @@ pub fn run() {
             reveal_session_file,
             reveal_path,
             open_path,
+            check_paths_exist,
+            migrate_session_cwd,
+            find_relocation_candidates,
             get_session_file_path,
             get_session_summary,
             copy_to_clipboard,
