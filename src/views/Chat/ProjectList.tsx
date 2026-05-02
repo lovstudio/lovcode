@@ -2,11 +2,12 @@ import { useState, useMemo, useEffect, useRef, useLayoutEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ChevronDownIcon, ChevronRightIcon, DotsHorizontalIcon, ListBulletIcon, GroupIcon, MagnifyingGlassIcon, Cross2Icon, DesktopIcon } from "@radix-ui/react-icons";
+import { ChevronDownIcon, ChevronRightIcon, DotsHorizontalIcon, ListBulletIcon, GroupIcon, MagnifyingGlassIcon, Cross2Icon, DesktopIcon, RocketIcon, CheckIcon } from "@radix-ui/react-icons";
 import { Copy, Upload, ChevronUp, ChevronDown, Pin, RefreshCw, CornerDownLeft, AlertTriangle } from "lucide-react";
 import { TerminalPane, disposeTerminal } from "../../components/Terminal";
 import { TERMINAL_OPTIONS, type TerminalOption } from "../../components/ui/new-terminal-button";
 import { useAtom } from "jotai";
+import { atomWithStorage } from "jotai/utils";
 import {
   allProjectsSortByAtom,
   hideEmptySessionsAllAtom,
@@ -52,6 +53,28 @@ interface ProjectListProps {
   onSelectSession: (s: Session) => void;
   onSelectChat?: (c: ChatMessage) => void;
 }
+
+/** Mirrors MaasRegistryView's COMING_SOON_PROVIDERS — providers you can see
+ *  but not activate yet. Kept in sync by hand; grows rarely. */
+const COMING_SOON_PROVIDER_KEYS: ReadonlySet<string> = new Set([
+  "modelgate",
+  "univibe",
+  "siliconflow",
+  "qiniu",
+]);
+
+/** MRU list of `{providerKey}:{modelName}` pairs the user has picked from the
+ *  dropdown. Most-recent first; capped at MAX_RECENT. Persists across sessions. */
+interface RecentModelEntry {
+  providerKey: string;
+  modelName: string;
+  at: number;
+}
+const MAX_RECENT_MODELS = 5;
+const recentModelsAtom = atomWithStorage<RecentModelEntry[]>(
+  "lovcode:recentModels",
+  [],
+);
 
 export function ProjectList({ onSelectProject, onSelectSession }: ProjectListProps) {
   const toReadable = useReadableText();
@@ -1267,6 +1290,8 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
   const [userPromptsOnly, setUserPromptsOnly] = useAtom(userPromptsOnlyAtom);
   const [expandMessages, setExpandMessages] = useAtom(expandMessagesAtom);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const [modelSearch, setModelSearch] = useState("");
+  const [recentModels, setRecentModels] = useAtom(recentModelsAtom);
 
   const displaySummary = session.title || toReadable(session.summary) || "Untitled";
 
@@ -1276,6 +1301,101 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
     { projectId: session.project_id, sessionId: session.id },
   );
   const usage = liveUsage ?? session.usage;
+
+  // Active provider/model selector (reads from MaaS Registry + ~/.claude/settings.json)
+  const queryClient = useQueryClient();
+  const { data: maasRegistry = [] } = useInvokeQuery<import("../../types").MaasProvider[]>(
+    ["maas_registry"],
+    "get_maas_registry",
+  );
+  const { data: claudeSettings } = useInvokeQuery<import("../../types").ClaudeSettings>(
+    ["settings"],
+    "get_settings",
+  );
+  const activeProviderKey: string | null = (() => {
+    const raw = claudeSettings?.raw;
+    if (!raw || typeof raw !== "object") return null;
+    const lovcode = (raw as Record<string, unknown>).lovcode;
+    if (!lovcode || typeof lovcode !== "object") return null;
+    const v = (lovcode as Record<string, unknown>).activeProvider;
+    return typeof v === "string" ? v : null;
+  })();
+  const activeModelName: string | null = (() => {
+    const raw = claudeSettings?.raw;
+    if (!raw || typeof raw !== "object") return null;
+    const env = (raw as Record<string, unknown>).env;
+    if (!env || typeof env !== "object") return null;
+    const v = (env as Record<string, unknown>).ANTHROPIC_DEFAULT_SONNET_MODEL;
+    return typeof v === "string" && v ? v : null;
+  })();
+  const activeProvider = activeProviderKey
+    ? maasRegistry.find((p) => p.key === activeProviderKey) ?? null
+    : null;
+  const activeModel =
+    activeProvider && activeModelName
+      ? activeProvider.models.find((m) => m.modelName === activeModelName) ?? null
+      : null;
+  const activeVendor =
+    activeProvider && activeModel?.vendor
+      ? activeProvider.vendors?.find((v) => v.id === activeModel.vendor) ?? null
+      : null;
+
+  /** Switch to a provider, keeping the same modelName if that provider exposes it,
+   *  otherwise picking its first available model. */
+  const switchActiveProvider = async (provider: import("../../types").MaasProvider) => {
+    if (provider.models.length === 0) {
+      console.warn("provider has no models:", provider.key);
+      return;
+    }
+    const keepCurrent =
+      activeModelName && provider.models.some((m) => m.modelName === activeModelName)
+        ? activeModelName
+        : provider.models[0].modelName;
+    await switchActiveModel(provider, keepCurrent);
+  };
+
+  const switchActiveModel = async (provider: import("../../types").MaasProvider, modelName: string) => {
+    try {
+      if (provider.key === "anthropic-subscription") {
+        await invoke("update_settings_env", { envKey: "CLAUDE_CODE_USE_OAUTH", envValue: "1" });
+        await invoke("delete_settings_env", { envKey: "ANTHROPIC_AUTH_TOKEN" }).catch(() => {});
+        await invoke("delete_settings_env", { envKey: "ANTHROPIC_BASE_URL" }).catch(() => {});
+        await invoke("delete_settings_env", { envKey: "ANTHROPIC_DEFAULT_SONNET_MODEL" }).catch(() => {});
+      } else {
+        await invoke("update_settings_env", {
+          envKey: "ANTHROPIC_BASE_URL",
+          envValue: provider.baseUrl.trim(),
+        });
+        await invoke("update_settings_env", {
+          envKey: "ANTHROPIC_AUTH_TOKEN",
+          envValue: provider.authToken.trim(),
+        });
+        await invoke("update_settings_env", {
+          envKey: "ANTHROPIC_DEFAULT_SONNET_MODEL",
+          envValue: modelName,
+        });
+        await invoke("delete_settings_env", { envKey: "CLAUDE_CODE_USE_OAUTH" }).catch(() => {});
+      }
+      await invoke("update_settings_field", {
+        field: "lovcode",
+        value: { activeProvider: provider.key },
+      });
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+
+      // Record MRU — prepend, dedupe, cap
+      setRecentModels((prev) => {
+        const next: RecentModelEntry[] = [
+          { providerKey: provider.key, modelName, at: Date.now() },
+          ...prev.filter(
+            (r) => !(r.providerKey === provider.key && r.modelName === modelName),
+          ),
+        ];
+        return next.slice(0, MAX_RECENT_MODELS);
+      });
+    } catch (e) {
+      console.error("switchActiveModel failed", e);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -1559,7 +1679,7 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
 
       {/* Continue conversation: terminal-style prompt box pinned to the right pane bottom */}
       {!canResume && (
-        <div className="shrink-0 min-w-0 px-6 pb-4 pt-3 border-t border-border bg-background overflow-hidden">
+        <div className="shrink-0 min-w-0 px-6 pb-1 pt-3 border-t border-border bg-background overflow-hidden">
           <div className="px-4 py-2.5 border border-dashed border-border rounded-xl bg-card/60 text-xs text-muted-foreground">
             {session.source === "app-web"
               ? "This conversation was synced from claude.ai (web). Resume is only available for local CLI sessions."
@@ -1570,7 +1690,7 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
         </div>
       )}
       {canResume && (
-        <div className="shrink-0 min-w-0 px-6 pb-4 pt-3 border-t border-border bg-background overflow-hidden">
+        <div className="shrink-0 min-w-0 px-6 pb-1 pt-3 border-t border-border bg-background overflow-hidden">
           {activePty ? (
             <div className="border border-border rounded-xl overflow-hidden bg-terminal shadow-sm">
               <div className="flex items-center justify-between px-3 py-1.5 border-b border-border bg-card-alt/40">
@@ -1636,7 +1756,7 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
                   <CornerDownLeft className="w-4 h-4" />
                 </span>
               </div>
-              <div className="flex items-center justify-between gap-2 px-1">
+              <div className="flex items-center gap-2 px-1">
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <button className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-card rounded-md transition-colors">
@@ -1659,26 +1779,257 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
                   </DropdownMenuContent>
                 </DropdownMenu>
                 {(() => {
-                  const info = inferModelInfo(usage?.model);
+                  const histInfo = inferModelInfo(usage?.model);
                   const ctx = usage?.context_tokens ?? 0;
-                  if (!info && ctx === 0) return null;
-                  const pct = info?.contextWindow && ctx > 0 ? Math.min(100, Math.round((ctx / info.contextWindow) * 100)) : null;
-                  const parts = [
-                    info?.provider,
-                    info?.name,
-                    ctx > 0 ? `ctx ${formatTokens(ctx)}${pct !== null ? ` (${pct}%)` : ""}` : null,
-                  ].filter(Boolean) as string[];
-                  if (parts.length === 0) return null;
+                  const pct =
+                    histInfo?.contextWindow && ctx > 0
+                      ? Math.min(100, Math.round((ctx / histInfo.contextWindow) * 100))
+                      : null;
+                  const ctxPart =
+                    ctx > 0 ? `ctx ${formatTokens(ctx)}${pct !== null ? ` (${pct}%)` : ""}` : null;
+
+                  const usableProviders = maasRegistry.filter((p) => {
+                    if (COMING_SOON_PROVIDER_KEYS.has(p.key)) return false;
+                    const hasAuth =
+                      p.key === "anthropic-subscription" || p.authToken.trim().length > 0;
+                    return hasAuth && p.models.length > 0;
+                  });
+
+                  const providerLabel = activeProvider
+                    ? activeProvider.label || activeProvider.key
+                    : "Select platform";
+                  const modelLabel = activeModel
+                    ? activeModel.displayName
+                    : activeProvider
+                      ? "Select model"
+                      : "—";
+
                   return (
-                    <div
-                      className="text-[10px] text-muted-foreground font-mono truncate min-w-0"
-                      title={[
-                        info?.provider && `Provider: ${info.provider}`,
-                        info?.name && `Model: ${info.name}`,
-                        ctx > 0 && `Peak context: ${ctx.toLocaleString()} tokens${info?.contextWindow ? ` / ${info.contextWindow.toLocaleString()} (${pct}%)` : ""}`,
-                      ].filter(Boolean).join("\n")}
-                    >
-                      {parts.join(" · ")}
+                    <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                      {/* Model first (primary choice), platform second — visual order reversed */}
+                      <div className="flex flex-row-reverse items-center gap-1.5">
+                      {/* Platform / MaaS provider */}
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <button
+                            className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-card rounded-md transition-colors min-w-0"
+                            title={
+                              activeProvider
+                                ? `Platform: ${activeProvider.label || activeProvider.key}`
+                                : "No platform selected. Click to pick one."
+                            }
+                          >
+                            <RocketIcon className="w-3.5 h-3.5 flex-shrink-0" />
+                            <span className="truncate">{providerLabel}</span>
+                            <ChevronDownIcon className="w-3 h-3 flex-shrink-0" />
+                          </button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className="min-w-[220px] max-w-[320px] p-0">
+                          <div className="max-h-[360px] overflow-y-auto p-1">
+                            {usableProviders.length === 0 ? (
+                              <DropdownMenuItem disabled>
+                                <span className="text-xs text-muted-foreground">
+                                  No providers ready. Open Settings → MaaS Registry.
+                                </span>
+                              </DropdownMenuItem>
+                            ) : (
+                              usableProviders.map((p) => {
+                                const isCurrent = p.key === activeProviderKey;
+                                return (
+                                  <DropdownMenuItem
+                                    key={p.key}
+                                    onClick={() => switchActiveProvider(p)}
+                                    className={isCurrent ? "bg-primary/10" : ""}
+                                  >
+                                    <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                                      {isCurrent ? (
+                                        <CheckIcon className="w-3 h-3 text-primary flex-shrink-0" />
+                                      ) : (
+                                        <span className="w-3 flex-shrink-0" />
+                                      )}
+                                      <span className="text-xs font-medium truncate flex-1">
+                                        {p.label || p.key}
+                                      </span>
+                                      <span className="text-[10px] text-muted-foreground flex-shrink-0">
+                                        {p.models.length} model{p.models.length === 1 ? "" : "s"}
+                                      </span>
+                                    </div>
+                                  </DropdownMenuItem>
+                                );
+                              })
+                            )}
+                          </div>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+
+                      <span className="text-xs text-muted-foreground/60 flex-shrink-0">/</span>
+
+                      {/* Model (scoped to active provider) */}
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <button
+                            disabled={!activeProvider}
+                            className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-card rounded-md transition-colors min-w-0 disabled:opacity-50 disabled:cursor-not-allowed"
+                            title={
+                              activeModel
+                                ? `Model: ${activeModel.modelName}${
+                                    activeVendor ? `\nVendor: ${activeVendor.name}` : ""
+                                  }`
+                                : activeProvider
+                                  ? "Pick a model for this platform"
+                                  : "Select a platform first"
+                            }
+                          >
+                            <span className="truncate">{modelLabel}</span>
+                            <ChevronDownIcon className="w-3 h-3 flex-shrink-0" />
+                          </button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent
+                          align="end"
+                          className="min-w-[260px] max-w-[380px] p-0"
+                          onCloseAutoFocus={() => setModelSearch("")}
+                        >
+                          {activeProvider && activeProvider.models.length > 0 && (
+                            <div className="p-1.5 border-b border-border">
+                              <input
+                                type="text"
+                                autoFocus
+                                value={modelSearch}
+                                onChange={(e) => setModelSearch(e.target.value)}
+                                placeholder="Search id, name, vendor..."
+                                spellCheck={false}
+                                // Prevent Radix's built-in typeahead from intercepting keys
+                                onKeyDown={(e) => {
+                                  if (e.key !== "Escape" && e.key !== "Enter" && e.key !== "Tab") {
+                                    e.stopPropagation();
+                                  }
+                                }}
+                                className="w-full h-7 px-2 text-xs rounded bg-background border border-input focus:outline-none focus:ring-1 focus:ring-ring"
+                              />
+                            </div>
+                          )}
+                          <div className="max-h-[360px] overflow-y-auto p-1">
+                            {!activeProvider ? (
+                              <DropdownMenuItem disabled>
+                                <span className="text-xs text-muted-foreground">
+                                  Pick a platform first
+                                </span>
+                              </DropdownMenuItem>
+                            ) : activeProvider.models.length === 0 ? (
+                              <DropdownMenuItem disabled>
+                                <span className="text-xs text-muted-foreground">
+                                  This platform has no models. Open Settings → MaaS Registry.
+                                </span>
+                              </DropdownMenuItem>
+                            ) : (() => {
+                              const q = modelSearch.trim().toLowerCase();
+                              const sorted = activeProvider.models
+                                .slice()
+                                .sort((a, b) => a.modelName.localeCompare(b.modelName));
+
+                              const renderItem = (m: import("../../types").MaasModel, keyPrefix = "") => {
+                                const vendor = m.vendor
+                                  ? activeProvider.vendors?.find((v) => v.id === m.vendor) ?? null
+                                  : null;
+                                const isCurrent = m.modelName === activeModelName;
+                                return (
+                                  <DropdownMenuItem
+                                    key={`${keyPrefix}${m.id}`}
+                                    onClick={() => switchActiveModel(activeProvider, m.modelName)}
+                                    className={isCurrent ? "bg-primary/10" : ""}
+                                  >
+                                    <div className="flex flex-col gap-0.5 min-w-0 flex-1">
+                                      <div className="flex items-center gap-1.5">
+                                        {isCurrent ? (
+                                          <CheckIcon className="w-3 h-3 text-primary flex-shrink-0" />
+                                        ) : (
+                                          <span className="w-3 flex-shrink-0" />
+                                        )}
+                                        <span className="text-xs font-medium truncate">
+                                          {m.displayName}
+                                        </span>
+                                        {vendor && (
+                                          <span className="text-[10px] text-muted-foreground truncate">
+                                            {vendor.name}
+                                          </span>
+                                        )}
+                                      </div>
+                                      <span className="text-[10px] text-muted-foreground font-mono truncate pl-4">
+                                        {m.modelName}
+                                      </span>
+                                    </div>
+                                  </DropdownMenuItem>
+                                );
+                              };
+
+                              // Searching: filter the full list, skip Recent section
+                              if (q) {
+                                const filtered = sorted.filter((m) => {
+                                  const vendorName = m.vendor
+                                    ? activeProvider.vendors?.find((v) => v.id === m.vendor)?.name ?? m.vendor
+                                    : "";
+                                  return (
+                                    m.id.toLowerCase().includes(q) ||
+                                    m.displayName.toLowerCase().includes(q) ||
+                                    m.modelName.toLowerCase().includes(q) ||
+                                    vendorName.toLowerCase().includes(q)
+                                  );
+                                });
+                                if (filtered.length === 0) {
+                                  return (
+                                    <div className="px-2 py-3 text-center text-xs text-muted-foreground">
+                                      No models match "{modelSearch}"
+                                    </div>
+                                  );
+                                }
+                                return filtered.map((m) => renderItem(m));
+                              }
+
+                              // Not searching: Recent section (current provider's recent picks) + All
+                              const recentForProvider = recentModels
+                                .filter((r) => r.providerKey === activeProvider.key)
+                                .map((r) => activeProvider.models.find((m) => m.modelName === r.modelName))
+                                .filter((m): m is import("../../types").MaasModel => !!m);
+
+                              return (
+                                <>
+                                  {recentForProvider.length > 0 && (
+                                    <>
+                                      <div className="px-2 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                                        Recent
+                                      </div>
+                                      {recentForProvider.map((m) => renderItem(m, "recent:"))}
+                                      <div className="my-1 border-t border-border" />
+                                      <div className="px-2 pt-0.5 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                                        All Models
+                                      </div>
+                                    </>
+                                  )}
+                                  {sorted.map((m) => renderItem(m, "all:"))}
+                                </>
+                              );
+                            })()}
+                          </div>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                      </div>
+
+                      {ctxPart && (
+                        <span
+                          className="text-[10px] text-muted-foreground font-mono truncate ml-auto"
+                          title={
+                            ctx > 0
+                              ? `Peak context: ${ctx.toLocaleString()} tokens${
+                                  histInfo?.contextWindow
+                                    ? ` / ${histInfo.contextWindow.toLocaleString()} (${pct}%)`
+                                    : ""
+                                }`
+                              : undefined
+                          }
+                        >
+                          {ctxPart}
+                        </span>
+                      )}
                     </div>
                   );
                 })()}

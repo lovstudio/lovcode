@@ -395,12 +395,42 @@ fn save_provider_contexts(contexts: &serde_json::Map<String, Value>) -> Result<(
 // MaaS Registry (provider + model mappings for empty-state cascading picker)
 // ============================================================================
 
+/// A model vendor (the entity that *trained* the model, e.g. "anthropic", "openai").
+/// Distinct from `MaasProvider`, which is the *access platform* (e.g. zenmux,
+/// modelgate) that resells models from many vendors. One MaasProvider has many
+/// Vendors and many MaasModels; each MaasModel references its vendor by id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Vendor {
+    id: String,
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    icon_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    website_url: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MaasModel {
     id: String,
     display_name: String,
     model_name: String,
+    /// References `Vendor.id` on the parent MaasProvider's `vendors` list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    vendor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    icon_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_modalities: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    output_modalities: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_window: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -409,8 +439,26 @@ struct MaasProvider {
     key: String,
     label: String,
     base_url: String,
-    auth_env_key: String,
+    /// API key / bearer token in plaintext. Stored on disk in the user's
+    /// lovstudio dir (~/.lovstudio/maas_registry.json). Migrated from the
+    /// legacy `authEnvKey` field on first read.
+    #[serde(default, alias = "authEnvKey")]
+    auth_token: String,
     models: Vec<MaasModel>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    vendors: Vec<Vendor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fetch_command: Option<String>,
+    /// ISO-8601 timestamp of the most recent successful Verify call. Persisted
+    /// alongside `last_verified_token_hash` so the UI can show "verified" only
+    /// when the saved token still matches what was verified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_verified_at: Option<String>,
+    /// Short non-reversible fingerprint of the auth_token at the moment of the
+    /// last successful verification. Compared against the current token to
+    /// decide whether the verified state is still valid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_verified_token_hash: Option<String>,
 }
 
 fn get_maas_registry_path() -> PathBuf {
@@ -418,84 +466,83 @@ fn get_maas_registry_path() -> PathBuf {
 }
 
 fn default_maas_registry() -> Vec<MaasProvider> {
-    fn m(id: &str, display: &str, name: &str) -> MaasModel {
-        MaasModel {
-            id: id.to_string(),
-            display_name: display.to_string(),
-            model_name: name.to_string(),
-        }
-    }
-    let anthropic_native_models = vec![
-        m("opus-4-7", "Claude Opus 4.7", "claude-opus-4-7-20251101"),
-        m("sonnet-4-6", "Claude Sonnet 4.6", "claude-sonnet-4-6-20251001"),
-        m("haiku-4-5", "Claude Haiku 4.5", "claude-haiku-4-5-20250930"),
-    ];
     vec![
         MaasProvider {
             key: "anthropic-subscription".into(),
             label: "Anthropic Subscription".into(),
             base_url: "".into(),
-            auth_env_key: "CLAUDE_CODE_USE_OAUTH".into(),
-            models: anthropic_native_models.clone(),
+            auth_token: String::new(),
+            models: vec![],
+            vendors: vec![],
+            fetch_command: None,
+            last_verified_at: None,
+            last_verified_token_hash: None,
         },
         MaasProvider {
             key: "native".into(),
             label: "Anthropic API".into(),
             base_url: "https://api.anthropic.com".into(),
-            auth_env_key: "ANTHROPIC_API_KEY".into(),
-            models: anthropic_native_models,
+            auth_token: String::new(),
+            models: vec![],
+            vendors: vec![],
+            fetch_command: None,
+            last_verified_at: None,
+            last_verified_token_hash: None,
         },
         MaasProvider {
             key: "zenmux".into(),
             label: "ZenMux".into(),
             base_url: "https://zenmux.ai/api/anthropic".into(),
-            auth_env_key: "ZENMUX_API_KEY".into(),
-            models: vec![
-                m("sonnet-4-6", "Claude Sonnet 4.6", "anthropic/claude-sonnet-4-6-20251001"),
-                m("sonnet-4-5", "Claude Sonnet 4.5", "anthropic/claude-sonnet-4.5"),
-                m("haiku-4-5", "Claude Haiku 4.5", "anthropic/claude-haiku-4.5"),
-            ],
+            auth_token: String::new(),
+            models: vec![],
+            vendors: vec![],
+            fetch_command: None,
+            last_verified_at: None,
+            last_verified_token_hash: None,
         },
         MaasProvider {
             key: "modelgate".into(),
             label: "ModelGate".into(),
             base_url: "https://mg.aid.pub/claude-proxy".into(),
-            auth_env_key: "MODELGATE_API_KEY".into(),
-            models: vec![
-                m("sonnet-4-6", "Claude Sonnet 4.6", "anthropic/claude-sonnet-4-6-20251001"),
-                m("sonnet-4-5", "Claude Sonnet 4.5", "anthropic/claude-sonnet-4.5"),
-                m("haiku-4-5", "Claude Haiku 4.5", "anthropic/claude-haiku-4.5"),
-            ],
+            auth_token: String::new(),
+            models: vec![],
+            vendors: vec![],
+            fetch_command: None,
+            last_verified_at: None,
+            last_verified_token_hash: None,
         },
         MaasProvider {
             key: "qiniu".into(),
             label: "Qiniu Cloud".into(),
             base_url: "https://api.qnaigc.com".into(),
-            auth_env_key: "QINIU_API_KEY".into(),
-            models: vec![
-                m("sonnet-4-6", "Claude Sonnet 4.6", "claude-sonnet-4-6-20251001"),
-                m("haiku-4-5", "Claude Haiku 4.5", "claude-haiku-4-5-20250930"),
-            ],
+            auth_token: String::new(),
+            models: vec![],
+            vendors: vec![],
+            fetch_command: None,
+            last_verified_at: None,
+            last_verified_token_hash: None,
         },
         MaasProvider {
             key: "siliconflow".into(),
             label: "SiliconFlow".into(),
             base_url: "https://api.siliconflow.com/v1".into(),
-            auth_env_key: "SILICONFLOW_API_KEY".into(),
-            models: vec![
-                m("sonnet-4-5", "Claude Sonnet 4.5", "claude-sonnet-4-5"),
-                m("haiku-4-5", "Claude Haiku 4.5", "claude-haiku-4-5"),
-            ],
+            auth_token: String::new(),
+            models: vec![],
+            vendors: vec![],
+            fetch_command: None,
+            last_verified_at: None,
+            last_verified_token_hash: None,
         },
         MaasProvider {
             key: "univibe".into(),
             label: "UniVibe".into(),
             base_url: "https://api.univibe.cc/anthropic".into(),
-            auth_env_key: "UNIVIBE_API_KEY".into(),
-            models: vec![
-                m("sonnet-4-6", "Claude Sonnet 4.6", "claude-sonnet-4-6-20251001"),
-                m("haiku-4-5", "Claude Haiku 4.5", "claude-haiku-4-5-20250930"),
-            ],
+            auth_token: String::new(),
+            models: vec![],
+            vendors: vec![],
+            fetch_command: None,
+            last_verified_at: None,
+            last_verified_token_hash: None,
         },
     ]
 }
@@ -506,7 +553,53 @@ fn load_maas_registry() -> Result<Vec<MaasProvider>, String> {
         return Ok(default_maas_registry());
     }
     let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&content).map_err(|e| e.to_string())
+    let saved: Vec<MaasProvider> =
+        serde_json::from_str(&content).map_err(|e| e.to_string())?;
+
+    // Reconcile against defaults so built-in order is canonical and any
+    // accidentally-deleted built-in is restored. Strategy:
+    //   1. For each built-in (in default order), prefer the saved copy if
+    //      present (keeps user edits to token/models/fetchCommand/etc).
+    //   2. Append user-created custom providers (anything in `saved` whose key
+    //      is not in defaults), preserving their relative order.
+    let defaults = default_maas_registry();
+    let default_keys: std::collections::HashSet<String> =
+        defaults.iter().map(|p| p.key.clone()).collect();
+    let mut saved_by_key: std::collections::HashMap<String, MaasProvider> =
+        saved.iter().cloned().map(|p| (p.key.clone(), p)).collect();
+
+    let saved_keys_before: Vec<String> = saved.iter().map(|p| p.key.clone()).collect();
+
+    let mut registry: Vec<MaasProvider> = defaults
+        .into_iter()
+        .map(|d| saved_by_key.remove(&d.key).unwrap_or(d))
+        .collect();
+    for p in saved {
+        if !default_keys.contains(&p.key) {
+            registry.push(p);
+        }
+    }
+
+    let new_keys: Vec<String> = registry.iter().map(|p| p.key.clone()).collect();
+    if saved_keys_before != new_keys {
+        let _ = persist_maas_registry(&registry);
+    }
+    Ok(registry)
+}
+
+/// Keys of built-in providers that cannot be deleted by the user. Deleting
+/// them would just resurrect on next load anyway (see `load_maas_registry`).
+fn is_builtin_maas_key(key: &str) -> bool {
+    matches!(
+        key,
+        "anthropic-subscription"
+            | "native"
+            | "zenmux"
+            | "modelgate"
+            | "qiniu"
+            | "siliconflow"
+            | "univibe"
+    )
 }
 
 fn persist_maas_registry(registry: &[MaasProvider]) -> Result<(), String> {
@@ -6498,10 +6591,458 @@ fn upsert_maas_provider(provider: MaasProvider) -> Result<Vec<MaasProvider>, Str
 
 #[tauri::command]
 fn delete_maas_provider(key: String) -> Result<Vec<MaasProvider>, String> {
+    if is_builtin_maas_key(&key) {
+        return Err(format!(
+            "\"{}\" is a built-in provider and cannot be deleted. Clear its token / models if you want to disable it.",
+            key
+        ));
+    }
     let mut registry = load_maas_registry()?;
     registry.retain(|p| p.key != key);
     persist_maas_registry(&registry)?;
     Ok(registry)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FetchParseResult {
+    models: Vec<MaasModel>,
+    vendors: Vec<Vendor>,
+    raw_preview: String,
+    notes: Option<String>,
+}
+
+/// Execute a curl command in user's shell and pipe the response through
+/// `claude --print` to extract a normalized list of models.
+///
+/// The user pastes a raw curl (with cookies/headers/query) that returns the
+/// provider's model list. We then ask claude to return strict JSON
+/// `{ "models": [{"id","displayName","modelName"}], "notes": "..." }`.
+#[tauri::command]
+async fn fetch_and_parse_maas_models(
+    fetch_command: String,
+    provider_key: String,
+) -> Result<FetchParseResult, String> {
+    let _ = provider_key; // reserved for provider-specific overrides
+    let cmd = fetch_command.trim();
+    if cmd.is_empty() {
+        return Err("fetch command is empty".to_string());
+    }
+
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    println!("[maas-fetch] shell={} cmd_bytes={}", shell, cmd.len());
+
+    let curl_fut = tokio::process::Command::new(&shell)
+        .args(["-ilc", cmd])
+        .output();
+    let curl_out = tokio::time::timeout(Duration::from_secs(45), curl_fut)
+        .await
+        .map_err(|_| "Fetch step timed out after 45s. Check network / proxy.".to_string())?
+        .map_err(|e| format!("Failed to run fetch command: {}", e))?;
+
+    let raw_stdout = String::from_utf8_lossy(&curl_out.stdout).to_string();
+    let raw_stderr = String::from_utf8_lossy(&curl_out.stderr).to_string();
+    println!(
+        "[maas-fetch] curl exit={:?} stdout_bytes={} stderr_bytes={}",
+        curl_out.status.code(),
+        raw_stdout.len(),
+        raw_stderr.len()
+    );
+    if !curl_out.status.success() && raw_stdout.trim().is_empty() {
+        return Err(format!(
+            "fetch command failed (exit={:?}): {}",
+            curl_out.status.code(),
+            raw_stderr.chars().take(500).collect::<String>()
+        ));
+    }
+    if raw_stdout.trim().is_empty() {
+        return Err(format!(
+            "fetch command produced no stdout. stderr: {}",
+            raw_stderr.chars().take(500).collect::<String>()
+        ));
+    }
+
+    let raw_preview: String = raw_stdout.chars().take(1000).collect();
+
+    // Step 2: parse JSON. Try known provider schemas first (zenmux), fall back
+    // to a generic heuristic walker for unknown shapes.
+    let json: serde_json::Value = serde_json::from_str(&raw_stdout).map_err(|e| {
+        format!(
+            "Response is not valid JSON: {}. First 500 chars:\n{}",
+            e,
+            raw_stdout.chars().take(500).collect::<String>()
+        )
+    })?;
+
+    let (mut models, mut vendors, parser_label) = if let Some((m, v)) = parse_zenmux(&json) {
+        (m, v, "zenmux")
+    } else {
+        let m = extract_models_heuristic(&json);
+        let v = synthesize_vendors_from_models(&m);
+        (m, v, "heuristic")
+    };
+    // De-dup by modelName, preserve order
+    let mut seen = std::collections::HashSet::new();
+    models.retain(|m| seen.insert(m.model_name.clone()));
+    // Ensure id uniqueness
+    let mut id_seen = std::collections::HashSet::new();
+    for m in models.iter_mut() {
+        let base = m.id.clone();
+        let mut i = 2;
+        while !id_seen.insert(m.id.clone()) {
+            m.id = format!("{}-{}", base, i);
+            i += 1;
+        }
+    }
+
+    println!("[maas-fetch] {} parser extracted {} models", parser_label, models.len());
+
+    let notes = if models.is_empty() {
+        Some(format!(
+            "No models found by {} parser. Response may use a non-standard schema.",
+            parser_label
+        ))
+    } else {
+        Some(format!(
+            "Extracted {} models via {} parser.",
+            models.len(),
+            parser_label
+        ))
+    };
+
+    // Drop vendors that no model references (post de-dup)
+    let referenced: std::collections::HashSet<String> = models
+        .iter()
+        .filter_map(|m| m.vendor.clone())
+        .collect();
+    vendors.retain(|v| referenced.contains(&v.id));
+
+    Ok(FetchParseResult {
+        models,
+        vendors,
+        raw_preview,
+        notes,
+    })
+}
+
+/// When the heuristic walker finds models without explicit vendor info, build
+/// a minimal vendor list from the unique vendor ids it inferred.
+fn synthesize_vendors_from_models(models: &[MaasModel]) -> Vec<Vendor> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for m in models {
+        if let Some(vid) = &m.vendor {
+            if seen.insert(vid.clone()) {
+                out.push(Vendor {
+                    id: vid.clone(),
+                    name: vid.clone(),
+                    icon_url: None,
+                    description: None,
+                    website_url: None,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// ZenMux: `{"success":true,"data":{"models":[{slug, name, author, icon_url,
+/// description, input_modalities, output_modalities, visible, ...}]}}`.
+/// `slug` is the API model id (e.g. "anthropic/claude-sonnet-4-6-20251001"),
+/// `name` is the human label (e.g. "Anthropic: Claude Sonnet 4.6"),
+/// `author` is the vendor id (e.g. "anthropic").
+fn parse_zenmux(root: &serde_json::Value) -> Option<(Vec<MaasModel>, Vec<Vendor>)> {
+    let arr = root.get("data")?.get("models")?.as_array()?;
+    let mut out: Vec<MaasModel> = Vec::with_capacity(arr.len());
+    let mut vendor_map: std::collections::HashMap<String, Vendor> = std::collections::HashMap::new();
+    let mut vendor_order: Vec<String> = Vec::new();
+
+    for item in arr {
+        let obj = match item.as_object() {
+            Some(o) => o,
+            None => continue,
+        };
+        if obj.get("visible").and_then(|x| x.as_i64()) == Some(0) {
+            continue;
+        }
+        let slug = obj
+            .get("slug")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())?;
+        let raw_name = obj
+            .get("name")
+            .and_then(|x| x.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| derive_display_name(slug));
+        // "Anthropic: Claude Sonnet 4.6" → "Claude Sonnet 4.6"
+        let (vendor_label_from_name, display_name) = match raw_name.split_once(':') {
+            Some((vlabel, rest)) => (
+                Some(vlabel.trim().to_string()),
+                rest.trim().to_string(),
+            ),
+            None => (None, raw_name.clone()),
+        };
+        let display_name = if display_name.is_empty() { raw_name } else { display_name };
+
+        let vendor_id_raw = obj
+            .get("author")
+            .and_then(|x| x.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| slug.split_once('/').map(|(p, _)| p.to_string()));
+
+        let vendor_id = vendor_id_raw.as_ref().map(|s| slugify_id(s));
+        let icon_url = obj
+            .get("icon_url")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+
+        if let Some(ref vid) = vendor_id {
+            vendor_map
+                .entry(vid.clone())
+                .and_modify(|v| {
+                    if v.icon_url.is_none() {
+                        v.icon_url = icon_url.clone();
+                    }
+                })
+                .or_insert_with(|| {
+                    vendor_order.push(vid.clone());
+                    Vendor {
+                        id: vid.clone(),
+                        name: vendor_label_from_name
+                            .clone()
+                            .unwrap_or_else(|| vendor_id_raw.clone().unwrap_or_else(|| vid.clone())),
+                        icon_url: icon_url.clone(),
+                        description: None,
+                        website_url: None,
+                    }
+                });
+        }
+
+        let description = obj
+            .get("description")
+            .and_then(|x| x.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let input_modalities = obj
+            .get("input_modalities")
+            .and_then(|x| x.as_str())
+            .map(parse_csv_modalities);
+        let output_modalities = obj
+            .get("output_modalities")
+            .and_then(|x| x.as_str())
+            .map(parse_csv_modalities);
+
+        out.push(MaasModel {
+            id: slugify_id(slug),
+            display_name,
+            model_name: slug.to_string(),
+            vendor: vendor_id,
+            description,
+            icon_url,
+            input_modalities,
+            output_modalities,
+            context_window: None,
+        });
+    }
+
+    if out.is_empty() {
+        return None;
+    }
+    let vendors = vendor_order
+        .into_iter()
+        .filter_map(|id| vendor_map.remove(&id))
+        .collect();
+    Some((out, vendors))
+}
+
+fn parse_csv_modalities(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
+/// Walk arbitrary JSON looking for objects that look like model entries.
+/// A "model object" has at least one of: `id`, `slug`, `model`, `model_id`, `name`
+/// that's a non-empty string and looks like a model identifier (contains `-`, `/`,
+/// or a digit; or the parent key is `data`/`models`/`list`).
+fn extract_models_heuristic(root: &serde_json::Value) -> Vec<MaasModel> {
+    let mut out = Vec::new();
+    walk_for_models(root, None, &mut out);
+    out
+}
+
+fn walk_for_models(
+    val: &serde_json::Value,
+    parent_key: Option<&str>,
+    out: &mut Vec<MaasModel>,
+) {
+    match val {
+        serde_json::Value::Array(arr) => {
+            // If the parent key suggests this is a model list, try to pull each item
+            let parent_is_modelish = matches!(
+                parent_key,
+                Some("data" | "models" | "list" | "items" | "modelList" | "model_list" | "result")
+            );
+            for item in arr {
+                if parent_is_modelish {
+                    if let Some(m) = try_extract_model(item) {
+                        out.push(m);
+                        continue;
+                    }
+                }
+                walk_for_models(item, parent_key, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            // Heuristic: if this object itself smells like a model, try it
+            if let Some(m) = try_extract_model(val) {
+                out.push(m);
+            }
+            for (k, v) in map {
+                walk_for_models(v, Some(k.as_str()), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn try_extract_model(v: &serde_json::Value) -> Option<MaasModel> {
+    let obj = v.as_object()?;
+
+    // Find the canonical model id field (what the API expects in `model:` param)
+    let model_name = ["modelName", "model_name", "model_id", "modelId", "model", "slug", "id"]
+        .iter()
+        .find_map(|k| obj.get(*k).and_then(|x| x.as_str()))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && looks_like_model_id(s))?;
+
+    // Display name
+    let display_name = ["displayName", "display_name", "name", "title", "label"]
+        .iter()
+        .find_map(|k| obj.get(*k).and_then(|x| x.as_str()))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| derive_display_name(&model_name));
+
+    let id_source = ["id", "slug"]
+        .iter()
+        .find_map(|k| obj.get(*k).and_then(|x| x.as_str()))
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| model_name.clone());
+    let id = slugify_id(&id_source);
+
+    let vendor = ["author", "owned_by", "ownedBy", "vendor", "organization", "org"]
+        .iter()
+        .find_map(|k| obj.get(*k).and_then(|x| x.as_str()))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| model_name.split_once('/').map(|(p, _)| p.to_string()))
+        .map(|s| slugify_id(&s));
+
+    let description = ["description", "summary"]
+        .iter()
+        .find_map(|k| obj.get(*k).and_then(|x| x.as_str()))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let icon_url = ["icon_url", "iconUrl", "logo", "logo_url"]
+        .iter()
+        .find_map(|k| obj.get(*k).and_then(|x| x.as_str()))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let modal = |k1: &str, k2: &str| -> Option<Vec<String>> {
+        if let Some(arr) = obj.get(k1).or_else(|| obj.get(k2)).and_then(|x| x.as_array()) {
+            let v: Vec<String> = arr
+                .iter()
+                .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect();
+            return if v.is_empty() { None } else { Some(v) };
+        }
+        if let Some(s) = obj.get(k1).or_else(|| obj.get(k2)).and_then(|x| x.as_str()) {
+            let v = parse_csv_modalities(s);
+            return if v.is_empty() { None } else { Some(v) };
+        }
+        None
+    };
+    let input_modalities = modal("input_modalities", "inputModalities");
+    let output_modalities = modal("output_modalities", "outputModalities");
+
+    let context_window = ["context_window", "contextWindow", "context_length", "max_input_tokens"]
+        .iter()
+        .find_map(|k| obj.get(*k).and_then(|x| x.as_u64()));
+
+    Some(MaasModel {
+        id,
+        display_name,
+        model_name,
+        vendor,
+        description,
+        icon_url,
+        input_modalities,
+        output_modalities,
+        context_window,
+    })
+}
+
+fn looks_like_model_id(s: &str) -> bool {
+    // Filter out garbage like "object" or "v1". Real model ids contain a digit
+    // and at least one dash/slash, or are 4+ chars and contain a digit.
+    let has_digit = s.chars().any(|c| c.is_ascii_digit());
+    let has_sep = s.contains('-') || s.contains('/') || s.contains('.');
+    s.len() >= 4 && (has_digit || has_sep) && !s.contains(' ')
+}
+
+fn slugify_id(s: &str) -> String {
+    // Take part after last `/` (drop "anthropic/" prefix etc.), lowercase,
+    // replace non-[a-z0-9-] with `-`, collapse repeats.
+    let tail = s.rsplit('/').next().unwrap_or(s);
+    let lower = tail.to_lowercase();
+    let mut out = String::with_capacity(lower.len());
+    let mut last_dash = false;
+    for c in lower.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+fn derive_display_name(model_name: &str) -> String {
+    let tail = model_name.rsplit('/').next().unwrap_or(model_name);
+    // Strip trailing date suffix like -20251001
+    let cleaned = if let Some(idx) = tail.rfind('-') {
+        let suffix = &tail[idx + 1..];
+        if suffix.len() == 8 && suffix.chars().all(|c| c.is_ascii_digit()) {
+            &tail[..idx]
+        } else {
+            tail
+        }
+    } else {
+        tail
+    };
+    cleaned
+        .split('-')
+        .map(|p| {
+            let mut chars = p.chars();
+            match chars.next() {
+                Some(c) => c.to_uppercase().chain(chars).collect::<String>(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // ============================================================================
@@ -7139,6 +7680,32 @@ struct ClaudeCliTestResult {
     code: i32,
     stdout: String,
     stderr: String,
+}
+
+/// Probe whether the local `claude` CLI is logged in via OAuth (Anthropic
+/// Subscription). Runs `claude --print 'ping'` *without* injecting any auth
+/// env vars, so the CLI uses its own ~/.claude/.credentials.json. Exit code 0
+/// + non-empty stdout → logged in. Otherwise the stderr usually says
+/// "not authenticated" or similar.
+#[tauri::command]
+async fn test_claude_cli_oauth() -> Result<ClaudeCliTestResult, String> {
+    // Use login shell so PATH includes nvm / native install
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let fut = tokio::process::Command::new(&shell)
+        .args(["-ilc", "claude --print 'ping'"])
+        .output();
+    let output = tokio::time::timeout(Duration::from_secs(30), fut)
+        .await
+        .map_err(|_| "claude CLI probe timed out after 30s".to_string())?
+        .map_err(|e| format!("Failed to execute claude CLI: {}", e))?;
+
+    let code = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    println!("claude cli oauth probe code={} stdout_len={} stderr={}", code, stdout.len(), stderr);
+
+    let ok = output.status.success() && !stdout.trim().is_empty();
+    Ok(ClaudeCliTestResult { ok, code, stdout, stderr })
 }
 
 #[tauri::command]
@@ -9395,6 +9962,7 @@ pub fn run() {
             save_maas_registry,
             upsert_maas_provider,
             delete_maas_provider,
+            fetch_and_parse_maas_models,
             update_settings_field,
             update_settings_permission_field,
             add_permission_directory,
@@ -9415,6 +9983,7 @@ pub fn run() {
             test_anthropic_connection,
             test_openai_connection,
             test_claude_cli,
+            test_claude_cli_oauth,
             list_distill_documents,
             find_session_project,
             get_distill_watch_enabled,
