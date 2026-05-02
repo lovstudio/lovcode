@@ -2,8 +2,10 @@ import { useState, useMemo, useEffect, useRef, useLayoutEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ChevronDownIcon, ChevronRightIcon, DotsHorizontalIcon, ListBulletIcon, GroupIcon, MagnifyingGlassIcon, Cross2Icon } from "@radix-ui/react-icons";
-import { Copy, Upload, ChevronUp, ChevronDown, Pin, RefreshCw } from "lucide-react";
+import { ChevronDownIcon, ChevronRightIcon, DotsHorizontalIcon, ListBulletIcon, GroupIcon, MagnifyingGlassIcon, Cross2Icon, DesktopIcon } from "@radix-ui/react-icons";
+import { Copy, Upload, ChevronUp, ChevronDown, Pin, RefreshCw, CornerDownLeft } from "lucide-react";
+import { TerminalPane, disposeTerminal } from "../../components/Terminal";
+import { TERMINAL_OPTIONS, type TerminalOption } from "../../components/ui/new-terminal-button";
 import { useAtom } from "jotai";
 import {
   allProjectsSortByAtom,
@@ -448,7 +450,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
   return (
     <div className="flex h-full">
       {/* Left Panel: Project Tree */}
-      <div className="w-80 shrink-0 border-r border-border overflow-y-auto">
+      <div className="w-80 shrink-0 border-r border-border overflow-y-auto overscroll-contain">
         <div className="px-4 py-4">
           <div className="flex items-center justify-between mb-1">
             <h2 className="font-serif text-lg font-semibold text-ink">Chat History</h2>
@@ -734,7 +736,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
       </div>
 
       {/* Right Panel: Session Detail */}
-      <div className="flex-1 overflow-y-auto" ref={detailScrollRef}>
+      <div className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
         {selectedSession ? (
           <SessionDetail
             session={selectedSession}
@@ -743,7 +745,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
             scrollRef={detailScrollRef}
           />
         ) : (
-          <div className="flex flex-col items-center justify-center h-full px-8 gap-4 text-muted-foreground text-sm">
+          <div className="flex-1 overflow-y-auto flex flex-col items-center justify-center px-8 gap-4 text-muted-foreground text-sm">
             <span>Select a session to preview</span>
             <div className="w-full max-w-2xl">
               <ActivityCard />
@@ -1188,6 +1190,64 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
   const [activeMatch, setActiveMatch] = useState(0);
   const [matchCount, setMatchCount] = useState(0);
 
+  // Resume-conversation state: prompt-box + spawned terminal
+  const canResume = session.source === "cli" && !!session.project_path;
+  // Default agent inferred from session source (only "cli" reaches here, default to claude)
+  const defaultTerminal = TERMINAL_OPTIONS.find((o) => o.type === "claude") ?? TERMINAL_OPTIONS[0];
+  const [terminalOpt, setTerminalOpt] = useState<TerminalOption>(defaultTerminal);
+  const [resumeInput, setResumeInput] = useState("");
+  const composingRef = useRef(false);
+  const resumeTextareaRef = useRef<HTMLTextAreaElement>(null);
+  // Once submitted, we mount a TerminalPane keyed by ptyId and hide the prompt textarea
+  const [activePty, setActivePty] = useState<{ ptyId: string; cwd: string; command?: string; initialInput?: string } | null>(null);
+
+  // Reset prompt + tear down PTY when switching to a different session
+  useEffect(() => {
+    setResumeInput("");
+    setActivePty((prev) => {
+      if (prev) {
+        disposeTerminal(prev.ptyId);
+        invoke("pty_kill", { id: prev.ptyId }).catch(() => {});
+        invoke("pty_purge_scrollback", { id: prev.ptyId }).catch(() => {});
+      }
+      return null;
+    });
+  }, [session.id]);
+
+  const submitResume = () => {
+    if (!canResume || !session.project_path) return;
+    const prompt = resumeInput.trim();
+    let command: string | undefined;
+    let initialInput: string | undefined;
+    const escape = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    if (terminalOpt.type === "claude") {
+      command = `claude --resume ${session.id}` + (prompt ? ` "${escape(prompt)}"` : "");
+    } else if (terminalOpt.type === "codex") {
+      command = `codex resume ${session.id}` + (prompt ? ` "${escape(prompt)}"` : "");
+    } else {
+      // Plain terminal: just open a shell, send prompt as initial input
+      initialInput = prompt || undefined;
+    }
+    setActivePty({
+      ptyId: crypto.randomUUID(),
+      cwd: session.project_path,
+      command,
+      initialInput,
+    });
+    setResumeInput("");
+  };
+
+  const closeActivePty = () => {
+    setActivePty((prev) => {
+      if (prev) {
+        disposeTerminal(prev.ptyId);
+        invoke("pty_kill", { id: prev.ptyId }).catch(() => {});
+        invoke("pty_purge_scrollback", { id: prev.ptyId }).catch(() => {});
+      }
+      return null;
+    });
+  };
+
   // Count matches from the actual rendered DOM (source of truth) after every render
   useEffect(() => {
     const root = contentRef.current;
@@ -1250,8 +1310,8 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
   };
 
   return (
-    <div className="pb-6">
-      <header className="sticky top-0 z-10 bg-background/95 backdrop-blur border-b border-border px-6 py-4 mb-4 flex items-start justify-between gap-4">
+    <div className="h-full flex flex-col min-h-0 min-w-0 overflow-hidden">
+      <header className="shrink-0 z-10 bg-background border-b border-border px-6 py-4 flex items-start justify-between gap-4">
         <div className="min-w-0">
           <h2
             className="font-serif text-xl font-semibold text-ink leading-tight mb-1 truncate"
@@ -1326,6 +1386,7 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
         </div>
       </header>
 
+      <div ref={scrollRef} className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden overscroll-contain pt-4 pb-6">
       <div className="px-6" ref={contentRef}>
 
 
@@ -1363,6 +1424,115 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
         defaultName={session.summary?.slice(0, 50).replace(/[/\\?%*:|"<>]/g, "-") || "session"}
       />
       </div>
+      </div>
+
+      {/* Continue conversation: terminal-style prompt box pinned to the right pane bottom */}
+      {!canResume && (
+        <div className="shrink-0 min-w-0 px-6 pb-4 pt-3 border-t border-border bg-background overflow-hidden">
+          <div className="px-4 py-2.5 border border-dashed border-border rounded-xl bg-card/60 text-xs text-muted-foreground">
+            {session.source === "app"
+              ? "This conversation was synced from claude.ai (web). Resume is only available for local CLI sessions."
+              : "This session has no project path on disk and cannot be resumed."}
+          </div>
+        </div>
+      )}
+      {canResume && (
+        <div className="shrink-0 min-w-0 px-6 pb-4 pt-3 border-t border-border bg-background overflow-hidden">
+          {activePty ? (
+            <div className="border border-border rounded-xl overflow-hidden bg-terminal shadow-sm">
+              <div className="flex items-center justify-between px-3 py-1.5 border-b border-border bg-card-alt/40">
+                <span className="text-xs text-muted-foreground font-mono truncate">
+                  {activePty.command ?? "shell"}
+                </span>
+                <button
+                  onClick={closeActivePty}
+                  className="p-1 rounded text-muted-foreground hover:bg-card-alt hover:text-ink transition-colors"
+                  title="Close terminal"
+                >
+                  <Cross2Icon className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <div className="h-72">
+                <TerminalPane
+                  ptyId={activePty.ptyId}
+                  cwd={activePty.cwd}
+                  command={activePty.command}
+                  initialInput={activePty.initialInput}
+                  visible
+                  autoFocus
+                  onExit={closeActivePty}
+                />
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-col gap-2">
+              <div className="flex items-start gap-2 px-4 py-2.5 border border-border/60 rounded-xl bg-terminal shadow-sm overflow-hidden">
+                <span className="shrink-0 text-sm leading-6 font-mono text-primary/80 select-none">$</span>
+                <textarea
+                  ref={resumeTextareaRef}
+                  rows={1}
+                  value={resumeInput}
+                  onChange={(e) => {
+                    setResumeInput(e.target.value);
+                    const ta = e.target;
+                    ta.style.height = "auto";
+                    ta.style.height = `${ta.scrollHeight}px`;
+                  }}
+                  placeholder={
+                    terminalOpt.type === "terminal"
+                      ? "Open a shell in this project (Enter to start)"
+                      : `Continue this conversation with ${terminalOpt.label}...`
+                  }
+                  className="flex-1 min-w-0 px-0 py-0 bg-transparent resize-none outline-none text-sm leading-6 font-mono text-neutral-100 caret-primary placeholder:text-neutral-500 overflow-hidden"
+                  onCompositionStart={() => { composingRef.current = true; }}
+                  onCompositionEnd={() => {
+                    requestAnimationFrame(() => { composingRef.current = false; });
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Process" || composingRef.current) return;
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      submitResume();
+                    }
+                  }}
+                />
+                <span
+                  className="pointer-events-none shrink-0 inline-flex items-center h-6 text-neutral-500 select-none"
+                  title="Press Enter to send"
+                >
+                  <CornerDownLeft className="w-4 h-4" />
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 px-1">
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-card rounded-md transition-colors">
+                      <DesktopIcon className="w-3.5 h-3.5" />
+                      <span>{terminalOpt.label}</span>
+                      <ChevronDownIcon className="w-3 h-3" />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start" className="min-w-[140px]">
+                    {TERMINAL_OPTIONS.map((opt) => (
+                      <DropdownMenuItem
+                        key={opt.type}
+                        onClick={() => setTerminalOpt(opt)}
+                      >
+                        <span className={opt.type === terminalOpt.type ? "font-medium" : ""}>
+                          {opt.label}
+                        </span>
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                <span className="text-[10px] text-muted-foreground font-mono truncate max-w-[60%]" title={session.project_path ?? undefined}>
+                  cwd: {session.project_path ? formatPath(session.project_path) : "—"}
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
