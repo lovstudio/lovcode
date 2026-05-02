@@ -35,21 +35,23 @@
 
 ## Release Highlights
 
-### v0.24.16 — Claude.ai Import
+### v0.27.0 — Chat Experience Upgrades
 
-Import and browse your claude.ai web conversation history alongside Claude Code sessions.
+Granular data sources, in-place reply, GFM tables, and Warm-Academic syntax-highlighted code blocks in chat.
 
 <img src="docs/images/claude-ai-import.png" alt="Claude.ai Import" width="100%">
 
 | Version | Highlights |
 |---------|------------|
-| **0.24.16** | Import claude.ai web exports (.zip/dir), data source tabs (All/Code/Web) |
+| **0.27.0** | Data source split into `cli` / `app-code` / `app-web` / `app-cowork` with two-level tabs; bottom inline input to continue a session; merge consecutive same-role messages; GFM tables + code-block syntax highlighting in chat |
+| **0.26.0** | Sidebar refactor — Pinned / Recent / Import groups + Algolia-style ⌘K search; live sync of claude.ai web chats (Cookies + Keychain decrypt → API pull); Pinned tri-state toggle mirrored to Claude desktop `starredIds` |
+| **0.25.0** | MaaS provider registry (`/settings/maas`) with 4 Tauri commands; new `/events` page; LLM provider presets extracted; standalone Home consolidated into Workspace |
+| **0.24.16** | Import claude.ai web exports (.zip/dir), data source tabs (All / Code / Web) |
 | **0.24.15** | Structured content blocks — view tool calls, thinking, tool results |
 | **0.24.14** | Full-text search with jieba Chinese tokenization |
 | **0.24.12** | Two-column master-detail layout with grouped/flat toggle |
 | **0.24.11** | In-app auto-updater |
 | **0.24.7** | Session usage tracking with token counts and cost estimation |
-| **0.24.6** | Script-configurable statusbar, Apple-style settings layout |
 | **0.24.0** | File-system routing architecture, settings split into sub-pages |
 
 [Full Changelog](CHANGELOG.md)
@@ -59,15 +61,14 @@ Import and browse your claude.ai web conversation history alongside Claude Code 
 ## Features
 
 - **Chat History Viewer** — Browse and search conversation history across all projects with full-text search (Chinese + English)
-- **Claude.ai Import** — Import and view exported data from claude.ai web app (.zip or directory)
-- **Data Source Switching** — Filter between Claude Code local sessions and claude.ai web conversations
-- **Structured Content Blocks** — View tool calls, thinking process, and tool results in conversations
-- **Commands Manager** — View and manage slash commands (`~/.claude/commands/`)
-- **MCP Servers** — Configure and monitor MCP server integrations
-- **Skills** — Manage reusable skill templates
-- **Hooks** — Configure automation triggers
-- **Sub-Agents** — Manage AI agents with custom models
-- **Output Styles** — Customize response formatting
+- **Granular Data Sources** — Switch between `cli` (Claude Code) / `app-code` / `app-web` / `app-cowork` with two-level tabs
+- **Live claude.ai Sync** — Pull web conversations directly via decrypted cookies (no manual export needed); also supports `.zip` / directory import
+- **Continue From the Bottom** — Reply to a session inline without leaving the detail view
+- **Rich Markdown Rendering** — GFM tables and syntax-highlighted code blocks (Warm Academic theme) inside chat messages
+- **Structured Content Blocks** — Tool calls, thinking, and tool results rendered as first-class blocks
+- **Sidebar with Pinned / Recent / Import** — Tri-state Pinned toggle mirrored to Claude desktop `starredIds`; Algolia-style ⌘K search
+- **MaaS Registry** — Manage custom Model-as-a-Service providers persistently (`/settings/maas`)
+- **Commands / MCP / Skills / Hooks / Sub-Agents / Output Styles** — Full configuration surface for the Claude Code ecosystem
 - **Marketplace** — Browse and install community templates
 - **Customizable Statusbar** — Personalize your statusbar display with scripts
 
@@ -107,11 +108,12 @@ pnpm tauri build
 ## Usage
 
 1. Launch Lovcode
-2. Select **Chat** to browse conversation history from Claude Code sessions
-3. Click the **Upload** button to import claude.ai exported data (.zip or folder)
-4. Switch between **All / Code / Web** tabs to filter by data source
-5. Use the **Configuration** section to manage commands, MCP servers, skills, and hooks
-6. Visit **Marketplace** to discover community templates
+2. Select **Chat** — sidebar shows Pinned / Recent / Import; ⌘K to search
+3. Use the two-level tabs to switch data source: `cli` / `app-code` / `app-web` / `app-cowork`
+4. Open a session: tool calls / thinking / GFM tables / code blocks render inline; reply at the bottom to continue
+5. Live-sync claude.ai web chats from your logged-in browser, or import a `.zip` / folder export
+6. Manage commands, MCP servers, skills, hooks, sub-agents, output styles, and MaaS providers under **Configuration**
+7. Visit **Marketplace** to discover community templates
 
 ## Tech Stack
 
