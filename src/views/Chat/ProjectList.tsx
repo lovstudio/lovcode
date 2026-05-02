@@ -13,6 +13,7 @@ import {
   originalChatAtom,
   markdownPreviewAtom,
   userPromptsOnlyAtom,
+  expandMessagesAtom,
   pinnedSessionIdsAtom,
   unpinnedAppIdsAtom,
   pinnedCollapsedAtom,
@@ -58,7 +59,14 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
   const { data: allSessions = [], isLoading: loadingSessions } = useInvokeQuery<Session[]>(["sessions"], "list_all_sessions");
 
   const [importing, setImporting] = useState(false);
-  const [dataSource, setDataSource] = useState<"all" | "local" | "web" | "app">("all");
+  // Two-level tab model:
+  //   top: "all" | "local" | "app"
+  //   sub (only when top==="app"): "code" | "web" | "cowork"
+  // Flattened into one DataSource value so filters key off a single variable.
+  type DataSource = "all" | "local" | "app-code" | "app-web" | "app-cowork";
+  const [dataSource, setDataSource] = useState<DataSource>("all");
+  const topTab: "all" | "local" | "app" =
+    dataSource === "all" ? "all" : dataSource === "local" ? "local" : "app";
 
   const [sortBy, setSortBy] = useAtom(allProjectsSortByAtom);
   const [hideEmptySessions, setHideEmptySessions] = useAtom(hideEmptySessionsAllAtom);
@@ -111,6 +119,18 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
       .then(() => setIndexReady(true))
       .catch(() => {});
   }, []);
+
+  // Single source-of-truth predicate for "does this session belong in the
+  // currently-selected data source tab". Used by every list-shaping memo below.
+  const matchesDataSource = (s: Session): boolean => {
+    switch (dataSource) {
+      case "all":        return true;
+      case "local":      return s.source === "cli";
+      case "app-code":   return s.source === "app-code";
+      case "app-web":    return s.source === "app-web";
+      case "app-cowork": return s.source === "app-cowork";
+    }
+  };
 
   // Auto-sync claude.ai web conversations on mount.
   // Reads the Claude desktop app's session cookie (decrypted via macOS Keychain),
@@ -175,7 +195,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
   const webSyncedRef = useRef(false);
   useEffect(() => {
     if (webSyncedRef.current) return;
-    if (dataSource !== "web") return;
+    if (dataSource !== "app-web") return;
     webSyncedRef.current = true;
     syncWebFromApp();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -213,7 +233,9 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
     if (syncedRef.current) return;
     if (allSessions.length === 0) return;
     syncedRef.current = true;
-    const appSessionIdSet = new Set(allSessions.filter((s) => s.source === "app").map((s) => s.id));
+    const appSessionIdSet = new Set(
+      allSessions.filter((s) => s.source.startsWith("app")).map((s) => s.id)
+    );
     setPinnedIds((prev) => {
       const cleaned = prev.filter((id) => !appSessionIdSet.has(id));
       return cleaned.length === prev.length ? prev : cleaned;
@@ -305,33 +327,22 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
 
   const loading = loadingProjects || loadingSessions;
 
-  // Web and App tabs are always shown — they represent first-class data
-  // sources (claude.ai web conversations, Claude desktop app Code sessions),
-  // independent of whether any data has been synced yet.
-  const hasWebData = true;
-  const hasAppData = true;
-
   // Sessions visible under the current data source — used for the header counter
   // so it matches what the user actually sees in the list.
-  const visibleSessions = useMemo(() => {
-    return allSessions.filter((s) => {
-      if (dataSource === "local") return s.project_id !== "-claude-ai" && s.source !== "app";
-      if (dataSource === "web") return s.project_id === "-claude-ai";
-      if (dataSource === "app") return s.source === "app";
-      return true;
-    });
-  }, [allSessions, dataSource]);
+  const visibleSessions = useMemo(
+    () => allSessions.filter(matchesDataSource),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [allSessions, dataSource]
+  );
 
   const sortedProjects = useMemo(() => {
     const filtered = projects.filter((p) => {
       if (p.session_count === 0) return false;
-      if (dataSource === "local") return p.id !== "-claude-ai";
-      if (dataSource === "web") return p.id === "-claude-ai";
-      if (dataSource === "app") {
-        // Only show projects that have at least one app session
-        return allSessions.some((s) => s.source === "app" && s.project_id === p.id);
-      }
-      return true;
+      if (dataSource === "all") return true;
+      // A project is visible in this tab iff at least one of its sessions
+      // belongs to the current data source. Keeps project-vs-session logic
+      // in one place — no more `id === "-claude-ai"` magic strings here.
+      return allSessions.some((s) => s.project_id === p.id && matchesDataSource(s));
     });
     return [...filtered].sort((a, b) => {
       switch (sortBy) {
@@ -352,7 +363,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
         .filter((s) => {
           if (!s.project_path) return false;
           if (hideEmptySessions && s.message_count === 0) return false;
-          if (dataSource === "app" && s.source !== "app") return false;
+          if (!matchesDataSource(s)) return false;
           if (effectivePinnedSet.has(s.id)) return false; // surfaced in the top Pinned section
           return normalizePath(s.project_path) === projectPathNorm;
         })
@@ -379,10 +390,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
         if (seen.has(s.id)) return false; // defensive dedupe — backend may emit dupes for same cliSessionId
         seen.add(s.id);
         if (hideEmptySessions && s.message_count === 0) return false;
-        if (dataSource === "local") return s.project_id !== "-claude-ai" && s.source !== "app";
-        if (dataSource === "web") return s.project_id === "-claude-ai";
-        if (dataSource === "app") return s.source === "app";
-        return true;
+        return matchesDataSource(s);
       })
       .sort((a, b) => b.last_modified - a.last_modified);
   }, [allSessions, effectivePinnedSet, hideEmptySessions, dataSource]);
@@ -393,10 +401,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
       .filter((s) => {
         if (s.message_count === 0 && hideEmptySessions) return false;
         if (effectivePinnedSet.has(s.id)) return false; // surfaced in the top Pinned section
-        if (dataSource === "local") return s.project_id !== "-claude-ai" && s.source !== "app";
-        if (dataSource === "web") return s.project_id === "-claude-ai";
-        if (dataSource === "app") return s.source === "app";
-        return true;
+        return matchesDataSource(s);
       })
       .sort((a, b) => {
         switch (sortBy) {
@@ -467,21 +472,48 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
             {sortedProjects.length} projects · {visibleSessions.length} sessions
           </p>
 
-          {/* Data source tabs */}
-          {(hasWebData || hasAppData) && (
-            <div className="flex gap-0.5 mb-2 p-0.5 rounded-lg bg-card-alt">
+          {/* Top-level source tabs: All / Local / App.
+              When App is active, a sub-tab row appears below for Code / Web / Cowork. */}
+          <div className="flex gap-0.5 mb-2 p-0.5 rounded-lg bg-card-alt">
+            {([
+              { key: "all", label: "All" },
+              { key: "local", label: "Local" },
+              { key: "app", label: "App" },
+            ] as { key: "all" | "local" | "app"; label: string }[]).map(({ key, label }) => (
+              <button
+                key={key}
+                onClick={() => {
+                  if (key === "all") setDataSource("all");
+                  else if (key === "local") setDataSource("local");
+                  else setDataSource("app-code"); // entering App defaults to Code sub-tab
+                }}
+                className={`flex-1 px-2 py-1 rounded-md text-xs transition-colors ${
+                  topTab === key
+                    ? "bg-card text-ink shadow-sm"
+                    : "text-muted-foreground hover:text-ink"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {topTab === "app" && (
+            <div className="flex gap-0.5 mb-2 p-0.5 rounded-lg bg-card-alt/60">
               {([
-                { key: "all", label: "All" },
-                { key: "local", label: "Code" },
-                ...(hasAppData ? [{ key: "app", label: "App" }] : []),
-                ...(hasWebData ? [{ key: "web", label: "Web" }] : []),
-              ] as { key: typeof dataSource; label: string }[]).map(({ key, label }) => (
+                { key: "app-code", label: "Code", disabled: false },
+                { key: "app-web", label: "Web", disabled: false },
+                { key: "app-cowork", label: "Cowork", disabled: true },
+              ] as { key: DataSource; label: string; disabled: boolean }[]).map(({ key, label, disabled }) => (
                 <button
                   key={key}
-                  onClick={() => setDataSource(key)}
+                  onClick={() => !disabled && setDataSource(key)}
+                  disabled={disabled}
+                  title={disabled ? "Coming soon" : undefined}
                   className={`flex-1 px-2 py-1 rounded-md text-xs transition-colors ${
                     dataSource === key
                       ? "bg-card text-ink shadow-sm"
+                      : disabled
+                      ? "text-muted-foreground/40 cursor-not-allowed"
                       : "text-muted-foreground hover:text-ink"
                   }`}
                 >
@@ -491,8 +523,8 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
             </div>
           )}
 
-          {/* Web tab status (only visible when Web tab is active) */}
-          {dataSource === "web" && (webSyncing || webSyncError) && (
+          {/* Web tab status (only visible when App › Web is active) */}
+          {dataSource === "app-web" && (webSyncing || webSyncError) && (
             <div className="mb-2 px-2 py-1.5 rounded-md bg-card-alt text-[11px]">
               {webSyncing && (
                 <div className="flex items-center gap-1.5 text-primary/90">
@@ -620,7 +652,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
             // Grouped by project
             sortedProjects.length === 0 ? (
               <div className="text-xs text-muted-foreground px-2 py-6 text-center">
-                No {dataSource === "all" ? "" : dataSource === "local" ? "code " : dataSource === "app" ? "app " : "web "}sessions
+                No {emptyStateLabel(dataSource)}sessions
               </div>
             ) : sortedProjects.map((project) => {
               const sessions = sessionsByProject.get(project.id) || [];
@@ -675,7 +707,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
             // Flat list
             flatSessions.length === 0 ? (
               <div className="text-xs text-muted-foreground px-2 py-6 text-center">
-                No {dataSource === "all" ? "" : dataSource === "local" ? "code " : dataSource === "app" ? "app " : "web "}sessions
+                No {emptyStateLabel(dataSource)}sessions
               </div>
             ) : flatSessions.map((session) => (
               <SessionItemButton
@@ -695,7 +727,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
           )}
 
           {/* Web tab — Import group at the end */}
-          {searchResults === null && dataSource === "web" && (
+          {searchResults === null && dataSource === "app-web" && (
             <div className="mb-1">
               <SectionHeader
                 icon={<Upload className="w-3 h-3" />}
@@ -773,6 +805,17 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
       )}
     </div>
   );
+}
+
+// Friendly label fragment for "No __ sessions" in empty states.
+function emptyStateLabel(ds: "all" | "local" | "app-code" | "app-web" | "app-cowork"): string {
+  switch (ds) {
+    case "all":        return "";
+    case "local":      return "local ";
+    case "app-code":   return "app code ";
+    case "app-web":    return "app web ";
+    case "app-cowork": return "cowork ";
+  }
 }
 
 // ============================================================================
@@ -1049,10 +1092,14 @@ function groupConsecutiveByRole(messages: Message[]): Message[][] {
   return groups;
 }
 
-function useGroupCollapse(deps: unknown[]) {
-  const [expanded, setExpanded] = useState(false);
+function useGroupCollapse(deps: unknown[], initialExpanded = false) {
+  const [expanded, setExpanded] = useState(initialExpanded);
   const [isOverflow, setIsOverflow] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setExpanded(initialExpanded);
+  }, [initialExpanded]);
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -1067,6 +1114,7 @@ function MessageGroupCard({
   group,
   originalChat,
   markdownPreview,
+  expandMessages,
   highlight,
   toReadable,
   onCopy,
@@ -1074,77 +1122,87 @@ function MessageGroupCard({
   group: Message[];
   originalChat: boolean;
   markdownPreview: boolean;
+  expandMessages: boolean;
   highlight?: string;
   toReadable: (s: string | null) => string;
   onCopy: (content: string) => void;
 }) {
   const groupContent = group.map((m) => toReadable(m.content)).join("\n\n");
   const firstTs = group[0].timestamp;
-  const lastTs = group[group.length - 1].timestamp;
-  const { expanded, setExpanded, isOverflow, ref } = useGroupCollapse([group, markdownPreview, originalChat]);
+  const { expanded, setExpanded, isOverflow, ref } = useGroupCollapse(
+    [group, markdownPreview, originalChat],
+    expandMessages,
+  );
   const [hovered, setHovered] = useState(false);
   const showHover = hovered ? "opacity-100" : "opacity-0";
+
+  const isUser = group[0].role === "user";
 
   return (
     <div
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
-      className={`relative rounded-xl px-4 py-3 ${
-        group[0].role === "user" ? "bg-card-alt" : "bg-card border border-border"
+      className={`relative py-1.5 pl-4 pr-10 border-b border-border/40 ${
+        isUser ? "bg-primary/[0.07]" : "bg-card"
       }`}
     >
-      <div className="text-xs text-muted-foreground mb-1.5 uppercase tracking-wide flex items-center gap-2">
-        <span>{group[0].role}</span>
-        {firstTs && (
-          <span
-            className={`normal-case tracking-normal ${showHover}`}
-            title={
-              lastTs && lastTs !== firstTs
-                ? `${new Date(firstTs).toLocaleString()} – ${new Date(lastTs).toLocaleString()}`
-                : new Date(firstTs).toLocaleString()
-            }
-          >
-            {new Date(firstTs).toLocaleString()}
-          </span>
-        )}
-        <span className="ml-auto flex items-center gap-1 normal-case tracking-normal">
-          {isOverflow && (
-            <button
-              onClick={() => setExpanded(!expanded)}
-              title={expanded ? "Collapse" : "Expand"}
-              className={`p-1 rounded-md hover:bg-card-alt text-muted-foreground hover:text-ink ${showHover}`}
-            >
-              {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-            </button>
-          )}
-          <button
-            onClick={() => onCopy(groupContent)}
-            className={`p-1 rounded-md hover:bg-card-alt text-muted-foreground hover:text-ink ${showHover}`}
-          >
-            <Copy size={13} />
-          </button>
-        </span>
-      </div>
-      <div
-        ref={ref}
-        className={`text-ink text-sm leading-relaxed ${
-          expanded ? "" : "max-h-20 overflow-hidden"
-        }`}
-      >
-        <div className="space-y-2">
-          {group.map((msg, idx) => (
-            <div
-              key={msg.uuid}
-              className={idx > 0 ? "pt-2 border-t border-border/40" : ""}
-            >
-              {msg.content_blocks && !originalChat ? (
-                <ContentBlockRenderer blocks={msg.content_blocks} markdown={markdownPreview} highlight={highlight} disableTextCollapse />
-              ) : (
-                <CollapsibleContent content={toReadable(msg.content)} markdown={markdownPreview} highlight={highlight} disableCollapse />
-              )}
-            </div>
-          ))}
+      <div className="min-w-0">
+        <div
+          ref={ref}
+          onClick={() => {
+            if (!expanded && isOverflow) setExpanded(true);
+          }}
+          className={`text-sm leading-relaxed text-ink ${
+            expanded ? "" : `max-h-20 overflow-hidden ${isOverflow ? "cursor-pointer" : ""}`
+          }`}
+        >
+          <div className="space-y-1.5">
+            {group.map((msg, idx) => (
+              <div
+                key={msg.uuid}
+                className={idx > 0 ? "pt-1.5 border-t border-border/30" : ""}
+              >
+                {msg.content_blocks && !originalChat ? (
+                  <ContentBlockRenderer blocks={msg.content_blocks} markdown={markdownPreview} highlight={highlight} disableTextCollapse />
+                ) : (
+                  <CollapsibleContent content={toReadable(msg.content)} markdown={markdownPreview} highlight={highlight} disableCollapse />
+                )}
+              </div>
+            ))}
+          </div>
         </div>
+      </div>
+      <div className={`absolute top-2 right-3 transition-opacity ${showHover}`}>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              className="p-1 rounded text-muted-foreground hover:bg-card-alt hover:text-ink"
+              title="More"
+            >
+              <DotsHorizontalIcon width={13} />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-48">
+            {firstTs && (
+              <>
+                <DropdownMenuLabel className="text-[10px] text-muted-foreground font-normal normal-case tracking-normal">
+                  {new Date(firstTs).toLocaleString()}
+                </DropdownMenuLabel>
+                <DropdownMenuSeparator />
+              </>
+            )}
+            {isOverflow && (
+              <DropdownMenuItem onClick={() => setExpanded(!expanded)} className="gap-2 text-xs">
+                {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                {expanded ? "Collapse" : "Expand"}
+              </DropdownMenuItem>
+            )}
+            <DropdownMenuItem onClick={() => onCopy(groupContent)} className="gap-2 text-xs">
+              <Copy size={13} />
+              Copy
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
     </div>
   );
@@ -1158,6 +1216,7 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
   const [originalChat, setOriginalChat] = useAtom(originalChatAtom);
   const [markdownPreview, setMarkdownPreview] = useAtom(markdownPreviewAtom);
   const [userPromptsOnly, setUserPromptsOnly] = useAtom(userPromptsOnlyAtom);
+  const [expandMessages, setExpandMessages] = useAtom(expandMessagesAtom);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
 
   const displaySummary = session.title || toReadable(session.summary) || "Untitled";
@@ -1191,7 +1250,9 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
   const [matchCount, setMatchCount] = useState(0);
 
   // Resume-conversation state: prompt-box + spawned terminal
-  const canResume = session.source === "cli" && !!session.project_path;
+  // Only local CLI sessions can be resumed via `claude --resume`/`codex resume`.
+  // app-code sessions point to the same .jsonl on disk, so they're also resumable.
+  const canResume = (session.source === "cli" || session.source === "app-code") && !!session.project_path;
   // Default agent inferred from session source (only "cli" reaches here, default to claude)
   const defaultTerminal = TERMINAL_OPTIONS.find((o) => o.type === "claude") ?? TERMINAL_OPTIONS[0];
   const [terminalOpt, setTerminalOpt] = useState<TerminalOption>(defaultTerminal);
@@ -1311,7 +1372,7 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
 
   return (
     <div className="h-full flex flex-col min-h-0 min-w-0 overflow-hidden">
-      <header className="shrink-0 z-10 bg-background border-b border-border px-6 py-4 flex items-start justify-between gap-4">
+      <header className="shrink-0 z-10 bg-background border-b border-border px-4 py-3 flex items-start justify-between gap-4">
         <div className="min-w-0">
           <h2
             className="font-serif text-xl font-semibold text-ink leading-tight mb-1 truncate"
@@ -1362,6 +1423,9 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
               <DropdownMenuCheckboxItem checked={userPromptsOnly} onCheckedChange={setUserPromptsOnly}>
                 Prompts only
               </DropdownMenuCheckboxItem>
+              <DropdownMenuCheckboxItem checked={expandMessages} onCheckedChange={setExpandMessages}>
+                Expand messages
+              </DropdownMenuCheckboxItem>
               <DropdownMenuCheckboxItem checked={markdownPreview} onCheckedChange={setMarkdownPreview}>
                 Markdown preview
               </DropdownMenuCheckboxItem>
@@ -1386,8 +1450,8 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
         </div>
       </header>
 
-      <div ref={scrollRef} className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden overscroll-contain pt-4 pb-6">
-      <div className="px-6" ref={contentRef}>
+      <div ref={scrollRef} className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden overscroll-contain">
+      <div ref={contentRef}>
 
 
       {loading ? (
@@ -1400,13 +1464,14 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
           <span className="text-xs opacity-60">{session.id}</span>
         </div>
       ) : (
-        <div className="space-y-3">
+        <div className="border-t border-border/40">
           {(userPromptsOnly ? filteredMessages.map((m) => [m]) : groupConsecutiveByRole(filteredMessages)).map((group) => (
             <MessageGroupCard
               key={group[0].uuid}
               group={group}
               originalChat={originalChat}
               markdownPreview={markdownPreview}
+              expandMessages={expandMessages}
               highlight={highlight}
               toReadable={toReadable}
               onCopy={handleCopyContent}
@@ -1430,8 +1495,10 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
       {!canResume && (
         <div className="shrink-0 min-w-0 px-6 pb-4 pt-3 border-t border-border bg-background overflow-hidden">
           <div className="px-4 py-2.5 border border-dashed border-border rounded-xl bg-card/60 text-xs text-muted-foreground">
-            {session.source === "app"
+            {session.source === "app-web"
               ? "This conversation was synced from claude.ai (web). Resume is only available for local CLI sessions."
+              : session.source === "app-cowork"
+              ? "Cowork sessions cannot be resumed locally."
               : "This session has no project path on disk and cannot be resumed."}
           </div>
         </div>

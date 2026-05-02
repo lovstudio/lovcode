@@ -185,7 +185,11 @@ pub struct Session {
     pub created_at: u64,
     pub last_modified: u64,
     pub usage: Option<SessionUsage>,
-    /// "cli" (default) or "app" (opened via Claude desktop app Code tab)
+    /// One of:
+    ///   "cli"        — local Claude Code CLI session (~/.claude/projects/<encoded>/<uuid>.jsonl)
+    ///   "app-code"   — Claude desktop app's Code tab session (richer metadata, links to same CLI .jsonl)
+    ///   "app-web"    — claude.ai web conversation synced via Claude desktop app cookie
+    ///   "app-cowork" — Claude desktop app Cowork session (reserved, not yet implemented)
     #[serde(default = "default_source")]
     pub source: String,
 }
@@ -1220,7 +1224,7 @@ async fn list_all_sessions() -> Result<Vec<Session>, String> {
                                     if s.title.is_none() {
                                         s.title = meta.get("title").and_then(|v| v.as_str()).map(|t| t.to_string());
                                     }
-                                    s.source = "app".to_string();
+                                    s.source = "app-code".to_string();
                                 }
                                 continue;
                             }
@@ -1264,11 +1268,21 @@ async fn list_all_sessions() -> Result<Vec<Session>, String> {
                                 created_at,
                                 last_modified,
                                 usage: None,
-                                source: "app".to_string(),
+                                source: "app-code".to_string(),
                             });
                         }
                     }
                 }
+            }
+        }
+
+        // Mark sessions living under the synthetic "-claude-ai" project as
+        // app-web (synced from claude.ai). This stays after the desktop-app
+        // Code pass so app-code wins if the same id ever appeared in both
+        // (shouldn't happen — different id space — but defensive).
+        for s in all_sessions.iter_mut() {
+            if s.project_id == "-claude-ai" && s.source == "cli" {
+                s.source = "app-web".to_string();
             }
         }
 
@@ -1282,7 +1296,7 @@ async fn list_all_sessions() -> Result<Vec<Session>, String> {
             match by_id.get(&s.id) {
                 Some(existing) => {
                     let take_new = s.message_count > existing.message_count
-                        || (s.source == "app" && existing.source != "app");
+                        || (s.source.starts_with("app") && !existing.source.starts_with("app"));
                     if take_new {
                         let merged = Session {
                             title: s.title.clone().or_else(|| existing.title.clone()),
