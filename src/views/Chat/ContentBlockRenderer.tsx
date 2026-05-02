@@ -6,6 +6,7 @@ interface ContentBlockRendererProps {
   blocks: ContentBlock[];
   markdown: boolean;
   highlight?: string;
+  disableTextCollapse?: boolean;
 }
 
 const TOOL_COLORS: Record<string, string> = {
@@ -80,13 +81,13 @@ function ThinkingBlock({ thinking }: { thinking: string }) {
   );
 }
 
-export function ContentBlockRenderer({ blocks, markdown, highlight }: ContentBlockRendererProps) {
+export function ContentBlockRenderer({ blocks, markdown, highlight, disableTextCollapse }: ContentBlockRendererProps) {
   return (
     <div className="space-y-1">
       {blocks.map((block, i) => {
         switch (block.type) {
           case "text":
-            return <CollapsibleContent key={i} content={block.text} markdown={markdown} highlight={highlight} />;
+            return <CollapsibleContent key={i} content={block.text} markdown={markdown} highlight={highlight} disableCollapse={disableTextCollapse} />;
           case "tool_use":
             return <ToolUseBadge key={i} name={block.name} summary={block.summary} />;
           case "tool_result":

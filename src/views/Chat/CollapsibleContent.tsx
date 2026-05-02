@@ -7,6 +7,7 @@ interface CollapsibleContentProps {
   markdown: boolean;
   defaultCollapsed?: boolean;
   highlight?: string;
+  disableCollapse?: boolean;
 }
 
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -65,7 +66,7 @@ function makeRehypeHighlight(query: string) {
   };
 }
 
-export function CollapsibleContent({ content, markdown, defaultCollapsed = false, highlight }: CollapsibleContentProps) {
+export function CollapsibleContent({ content, markdown, defaultCollapsed = false, highlight, disableCollapse = false }: CollapsibleContentProps) {
   const [expanded, setExpanded] = useState(!defaultCollapsed);
   const [isOverflow, setIsOverflow] = useState(false);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -76,19 +77,20 @@ export function CollapsibleContent({ content, markdown, defaultCollapsed = false
   }, [highlight]);
 
   useLayoutEffect(() => {
+    if (disableCollapse) return;
     const el = contentRef.current;
     if (el) {
       setIsOverflow(el.scrollHeight > 40);
     }
-  }, [content, markdown]);
+  }, [content, markdown, disableCollapse]);
+
+  const collapsed = !disableCollapse && !expanded;
 
   return (
     <div className="relative">
       <div
         ref={contentRef}
-        className={`text-ink text-sm leading-relaxed overflow-hidden ${
-          !expanded ? "max-h-10" : ""
-        }`}
+        className={`text-ink text-sm leading-relaxed ${collapsed ? "overflow-hidden max-h-10" : ""}`}
       >
         {markdown ? (
           <div className="prose prose-sm max-w-none prose-p:my-1 prose-headings:my-2 prose-pre:my-2 prose-ul:my-1 prose-ol:my-1">
@@ -100,7 +102,7 @@ export function CollapsibleContent({ content, markdown, defaultCollapsed = false
           </p>
         )}
       </div>
-      {isOverflow && (
+      {!disableCollapse && isOverflow && (
         <button
           onClick={() => setExpanded(!expanded)}
           className="mt-1 text-xs text-primary hover:text-primary/80"

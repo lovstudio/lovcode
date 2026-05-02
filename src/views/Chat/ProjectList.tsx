@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef } from "react";
+import { useState, useMemo, useEffect, useRef, useLayoutEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -34,6 +34,7 @@ import {
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuLabel,
+  DropdownMenuCheckboxItem,
 } from "../../components/ui/dropdown-menu";
 import {
   SessionDropdownMenuItems,
@@ -1036,13 +1037,124 @@ function SessionItemButton({
 // Session Detail (right panel)
 // ============================================================================
 
+function groupConsecutiveByRole(messages: Message[]): Message[][] {
+  const groups: Message[][] = [];
+  for (const msg of messages) {
+    const last = groups[groups.length - 1];
+    if (last && last[0].role === msg.role) last.push(msg);
+    else groups.push([msg]);
+  }
+  return groups;
+}
+
+function useGroupCollapse(deps: unknown[]) {
+  const [expanded, setExpanded] = useState(false);
+  const [isOverflow, setIsOverflow] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (el) setIsOverflow(el.scrollHeight > 80);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
+
+  return { expanded, setExpanded, isOverflow, ref };
+}
+
+function MessageGroupCard({
+  group,
+  originalChat,
+  markdownPreview,
+  highlight,
+  toReadable,
+  onCopy,
+}: {
+  group: Message[];
+  originalChat: boolean;
+  markdownPreview: boolean;
+  highlight?: string;
+  toReadable: (s: string | null) => string;
+  onCopy: (content: string) => void;
+}) {
+  const groupContent = group.map((m) => toReadable(m.content)).join("\n\n");
+  const firstTs = group[0].timestamp;
+  const lastTs = group[group.length - 1].timestamp;
+  const { expanded, setExpanded, isOverflow, ref } = useGroupCollapse([group, markdownPreview, originalChat]);
+  const [hovered, setHovered] = useState(false);
+  const showHover = hovered ? "opacity-100" : "opacity-0";
+
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      className={`relative rounded-xl px-4 py-3 ${
+        group[0].role === "user" ? "bg-card-alt" : "bg-card border border-border"
+      }`}
+    >
+      <div className="text-xs text-muted-foreground mb-1.5 uppercase tracking-wide flex items-center gap-2">
+        <span>{group[0].role}</span>
+        {firstTs && (
+          <span
+            className={`normal-case tracking-normal ${showHover}`}
+            title={
+              lastTs && lastTs !== firstTs
+                ? `${new Date(firstTs).toLocaleString()} – ${new Date(lastTs).toLocaleString()}`
+                : new Date(firstTs).toLocaleString()
+            }
+          >
+            {new Date(firstTs).toLocaleString()}
+          </span>
+        )}
+        <span className="ml-auto flex items-center gap-1 normal-case tracking-normal">
+          {isOverflow && (
+            <button
+              onClick={() => setExpanded(!expanded)}
+              title={expanded ? "Collapse" : "Expand"}
+              className={`p-1 rounded-md hover:bg-card-alt text-muted-foreground hover:text-ink ${showHover}`}
+            >
+              {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+            </button>
+          )}
+          <button
+            onClick={() => onCopy(groupContent)}
+            className={`p-1 rounded-md hover:bg-card-alt text-muted-foreground hover:text-ink ${showHover}`}
+          >
+            <Copy size={13} />
+          </button>
+        </span>
+      </div>
+      <div
+        ref={ref}
+        className={`text-ink text-sm leading-relaxed ${
+          expanded ? "" : "max-h-20 overflow-hidden"
+        }`}
+      >
+        <div className="space-y-2">
+          {group.map((msg, idx) => (
+            <div
+              key={msg.uuid}
+              className={idx > 0 ? "pt-2 border-t border-border/40" : ""}
+            >
+              {msg.content_blocks && !originalChat ? (
+                <ContentBlockRenderer blocks={msg.content_blocks} markdown={markdownPreview} highlight={highlight} disableTextCollapse />
+              ) : (
+                <CollapsibleContent content={toReadable(msg.content)} markdown={markdownPreview} highlight={highlight} disableCollapse />
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Session; onClose: () => void; highlight?: string; scrollRef?: React.RefObject<HTMLDivElement | null> }) {
   const { formatPath } = useAppConfig();
   const toReadable = useReadableText();
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(true);
-  const [originalChat] = useAtom(originalChatAtom);
-  const [markdownPreview] = useAtom(markdownPreviewAtom);
+  const [originalChat, setOriginalChat] = useAtom(originalChatAtom);
+  const [markdownPreview, setMarkdownPreview] = useAtom(markdownPreviewAtom);
   const [userPromptsOnly, setUserPromptsOnly] = useAtom(userPromptsOnlyAtom);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
 
@@ -1179,22 +1291,25 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
               </button>
             </div>
           )}
-          <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
-            <input
-              type="checkbox"
-              checked={userPromptsOnly}
-              onChange={(e) => setUserPromptsOnly(e.target.checked)}
-              className="w-3 h-3 accent-primary cursor-pointer"
-            />
-            <span>Prompts only</span>
-          </label>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button className="p-1.5 rounded-lg text-muted-foreground hover:bg-card-alt">
                 <DotsHorizontalIcon width={16} />
               </button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-48">
+            <DropdownMenuContent align="end" className="w-56">
+              <DropdownMenuLabel className="text-xs text-muted-foreground">View</DropdownMenuLabel>
+              <DropdownMenuCheckboxItem checked={userPromptsOnly} onCheckedChange={setUserPromptsOnly}>
+                Prompts only
+              </DropdownMenuCheckboxItem>
+              <DropdownMenuCheckboxItem checked={markdownPreview} onCheckedChange={setMarkdownPreview}>
+                Markdown preview
+              </DropdownMenuCheckboxItem>
+              <DropdownMenuCheckboxItem checked={originalChat} onCheckedChange={setOriginalChat}>
+                Readable slash command
+              </DropdownMenuCheckboxItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuLabel className="text-xs text-muted-foreground">Session</DropdownMenuLabel>
               <SessionDropdownMenuItems
                 projectId={session.project_id}
                 sessionId={session.id}
@@ -1204,7 +1319,7 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
               <DropdownMenuSeparator />
               <DropdownMenuItem onClick={onClose} className="gap-2">
                 <Cross2Icon width={14} />
-                Close
+                Close panel
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -1225,40 +1340,17 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
         </div>
       ) : (
         <div className="space-y-3">
-          {filteredMessages.map((msg) => {
-            const displayContent = toReadable(msg.content);
-            return (
-              <div
-                key={msg.uuid}
-                className={`group relative rounded-xl p-4 ${
-                  msg.role === "user" ? "bg-card-alt" : "bg-card border border-border"
-                }`}
-              >
-                <button
-                  onClick={() => handleCopyContent(displayContent)}
-                  className="absolute top-3 right-3 p-1.5 rounded-md bg-card-alt/80 hover:bg-card-alt text-muted-foreground hover:text-ink transition-opacity opacity-0 group-hover:opacity-100"
-                >
-                  <Copy size={14} />
-                </button>
-                <p className="text-xs text-muted-foreground mb-2 uppercase tracking-wide flex items-center gap-2">
-                  <span>{msg.role}</span>
-                  {msg.timestamp && (
-                    <span
-                      className="normal-case tracking-normal opacity-0 group-hover:opacity-100 transition-opacity"
-                      title={new Date(msg.timestamp).toLocaleString()}
-                    >
-                      {new Date(msg.timestamp).toLocaleString()}
-                    </span>
-                  )}
-                </p>
-                {msg.content_blocks && !originalChat ? (
-                  <ContentBlockRenderer blocks={msg.content_blocks} markdown={markdownPreview} highlight={highlight} />
-                ) : (
-                  <CollapsibleContent content={displayContent} markdown={markdownPreview} highlight={highlight} />
-                )}
-              </div>
-            );
-          })}
+          {(userPromptsOnly ? filteredMessages.map((m) => [m]) : groupConsecutiveByRole(filteredMessages)).map((group) => (
+            <MessageGroupCard
+              key={group[0].uuid}
+              group={group}
+              originalChat={originalChat}
+              markdownPreview={markdownPreview}
+              highlight={highlight}
+              toReadable={toReadable}
+              onCopy={handleCopyContent}
+            />
+          ))}
         </div>
       )}
 

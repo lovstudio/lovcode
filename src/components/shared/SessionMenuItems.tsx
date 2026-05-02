@@ -1,11 +1,14 @@
 import { useAtom } from "jotai";
 import { invoke } from "@tauri-apps/api/core";
-import { FolderOpen, Copy, Download, Terminal, Archive, ArchiveRestore, Pin, PinOff } from "lucide-react";
+import { FolderOpen, Copy, Download, Terminal, Archive, ArchiveRestore, Pin, PinOff, FolderInput } from "lucide-react";
 import { ExternalLinkIcon, ChatBubbleIcon } from "@radix-ui/react-icons";
 import {
   DropdownMenuItem,
   DropdownMenuCheckboxItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubTrigger,
+  DropdownMenuSubContent,
 } from "@/components/ui/dropdown-menu";
 import {
   ContextMenuItem,
@@ -108,17 +111,6 @@ export function SessionDropdownMenuItems({
         {isPinned ? <PinOff size={14} /> : <Pin size={14} />}
         {isPinned ? "Unpin" : "Pin to top"}
       </DropdownMenuItem>
-      <DropdownMenuSeparator />
-      <DropdownMenuItem onClick={handleCopySessionId} className="gap-2">
-        <Copy size={14} />
-        Copy Session ID
-      </DropdownMenuItem>
-      {projectPath && (
-        <DropdownMenuItem onClick={() => handleCopyResumeCommand(projectPath)} className="gap-2">
-          <Terminal size={14} />
-          Copy Resume Command
-        </DropdownMenuItem>
-      )}
       {onResume && (
         <DropdownMenuItem onClick={onResume} className="gap-2">
           <ChatBubbleIcon className="w-3.5 h-3.5" />
@@ -136,18 +128,44 @@ export function SessionDropdownMenuItems({
         </DropdownMenuItem>
       )}
       <DropdownMenuSeparator />
-      <DropdownMenuItem onClick={handleReveal} className="gap-2">
-        <FolderOpen size={14} />
-        Reveal in Finder
-      </DropdownMenuItem>
-      <DropdownMenuItem onClick={handleOpenInEditor} className="gap-2">
-        <ExternalLinkIcon width={14} />
-        Open in Editor
-      </DropdownMenuItem>
-      <DropdownMenuItem onClick={handleCopyPath} className="gap-2">
-        <Copy size={14} />
-        Copy Path
-      </DropdownMenuItem>
+      <DropdownMenuSub>
+        <DropdownMenuSubTrigger className="gap-2">
+          <Copy size={14} />
+          Copy
+        </DropdownMenuSubTrigger>
+        <DropdownMenuSubContent>
+          <DropdownMenuItem onClick={handleCopySessionId} className="gap-2">
+            <Copy size={14} />
+            Session ID
+          </DropdownMenuItem>
+          {projectPath && (
+            <DropdownMenuItem onClick={() => handleCopyResumeCommand(projectPath)} className="gap-2">
+              <Terminal size={14} />
+              Resume Command
+            </DropdownMenuItem>
+          )}
+          <DropdownMenuItem onClick={handleCopyPath} className="gap-2">
+            <FolderInput size={14} />
+            File Path
+          </DropdownMenuItem>
+        </DropdownMenuSubContent>
+      </DropdownMenuSub>
+      <DropdownMenuSub>
+        <DropdownMenuSubTrigger className="gap-2">
+          <FolderOpen size={14} />
+          Open
+        </DropdownMenuSubTrigger>
+        <DropdownMenuSubContent>
+          <DropdownMenuItem onClick={handleReveal} className="gap-2">
+            <FolderOpen size={14} />
+            Reveal in Finder
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={handleOpenInEditor} className="gap-2">
+            <ExternalLinkIcon width={14} />
+            Open in Editor
+          </DropdownMenuItem>
+        </DropdownMenuSubContent>
+      </DropdownMenuSub>
       {(setOriginalChat || setMarkdownPreview) && (
         <>
           <DropdownMenuSeparator />
