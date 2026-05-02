@@ -35,14 +35,15 @@
 
 ## Release Highlights
 
-### v0.28.0 — Smart Paths & Live Context Window
+### v0.29.0 — Vendors, Tokens & Inline Model Picker
 
-Markdown link path resolution with existence checks, plus a live provider / model / context-window readout in session detail.
+MaaS registry reshaped around a new `Vendor` entity (model trainer) distinct from `Provider` (access platform), tokens stored inline with a verified-fingerprint stamp, and an inline provider/model picker pinned to the chat input.
 
 <img src="docs/images/claude-ai-import.png" alt="Claude.ai Import" width="100%">
 
 | Version | Highlights |
 |---------|------------|
+| **0.29.0** | MaaS registry: new `Vendor` entity separates model vendors (anthropic/openai) from access platforms (zenmux/modelgate); tokens now stored inline (migrated from `authEnvKey`) with a verified-fingerprint stamp; models gain description / icon / modalities / context-window metadata; `fetchCommand` for remote model-list pull; Settings/MaaS view rewritten; inline provider/model picker in the chat input footer with a 5-slot MRU persisted across sessions |
 | **0.28.0** | Session detail footer shows provider · model · peak context-window occupancy (input + cache aggregate); `messages` count switched to `rounds` (user prompts only); markdown `[text](path)` links resolve through smart PathLink (existence-checked + context menu); router restores last page on reload instead of forcing Dashboard |
 | **0.27.0** | Data source split into `cli` / `app-code` / `app-web` / `app-cowork` with two-level tabs; bottom inline input to continue a session; merge consecutive same-role messages; GFM tables + code-block syntax highlighting in chat |
 | **0.26.0** | Sidebar refactor — Pinned / Recent / Import groups + Algolia-style ⌘K search; live sync of claude.ai web chats (Cookies + Keychain decrypt → API pull); Pinned tri-state toggle mirrored to Claude desktop `starredIds` |
@@ -70,7 +71,8 @@ Markdown link path resolution with existence checks, plus a live provider / mode
 - **Live Context-Window Readout** — Session detail footer shows the active model, provider, and peak context-window occupancy (input + cache_read + cache_creation) per round
 - **Structured Content Blocks** — Tool calls, thinking, and tool results rendered as first-class blocks
 - **Sidebar with Pinned / Recent / Import** — Tri-state Pinned toggle mirrored to Claude desktop `starredIds`; Algolia-style ⌘K search
-- **MaaS Registry** — Manage custom Model-as-a-Service providers persistently (`/settings/maas`)
+- **MaaS Registry** — Manage custom Model-as-a-Service providers with vendor/model hierarchy, inline tokens, Verify fingerprinting, and remote model-list pull (`/settings/maas`)
+- **Inline Model Picker** — Switch active provider · vendor · model from the chat input footer; MRU remembers your last 5 picks across sessions
 - **Commands / MCP / Skills / Hooks / Sub-Agents / Output Styles** — Full configuration surface for the Claude Code ecosystem
 - **Marketplace** — Browse and install community templates
 - **Customizable Statusbar** — Personalize your statusbar display with scripts
