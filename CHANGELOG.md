@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.27.0
+
+### Minor Changes
+
+- 9dcd673: Chat experience upgrades:
+
+  - 数据源细分为 cli / app-code / app-web / app-cowork，会话详情支持双层 tab 切换
+  - 会话详情底部支持直接输入消息继续对话
+  - 会话详情合并同角色连续消息，菜单分组重构
+  - Chat markdown 渲染升级：支持 GFM 表格、代码块语法高亮（Warm Academic 主题）
+  - 提取 `codeTheme.ts` 共享模块，DocumentReader 与 Chat 复用同一套代码主题
+
 ## 0.26.0
 
 ### Minor Changes

@@ -458,7 +458,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
       <div className="w-80 shrink-0 border-r border-border overflow-y-auto overscroll-contain">
         <div className="px-4 py-4">
           <div className="flex items-center justify-between mb-1">
-            <h2 className="font-serif text-lg font-semibold text-ink">Lovcode History</h2>
+            <h2 className="font-serif text-lg font-semibold text-ink">History</h2>
             <button
               onClick={() => setSearchOpen(true)}
               className="flex items-center gap-1.5 p-1.5 rounded-md text-muted-foreground hover:text-ink hover:bg-card-alt transition-colors"
