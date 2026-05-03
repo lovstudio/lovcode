@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.31.0
+
+### Minor Changes
+
+- 架构重构：移除 Workspace dashboard，转向页面中心化路由。
+
+  - **移除 Workspace dashboard**：删除 `WorkspaceView`、`ProjectDashboard`、`ProjectSidebar`、`KanbanBoard`、`GitHistory`、`LogoManager`、`ProjectDiagnostics`、`FeatureSidebar`/`FeatureTabs` 全套模块，及 `PanelGrid`/`SessionPanel`。功能太杂、入口太深，KISS 重构。
+  - **`/chat/*` → `/history/*`**：路由更名，同时清掉 `useFeatureCreation`、`useNavigation` 这些只为旧 dashboard 服务的 hook。
+  - **`/knowledge/reference`（静态） → `/knowledge/source/[id]`（动态）**：知识库改为按 source 动态路由，新增 `SourceView` + `[...docPath]` 子路由。
+  - **新增 `useStreamedSessions` hook**：session 列表流式渲染，长列表首屏更快。
+  - **Splash 时序**：根布局延迟到 `/history` 的 `ProjectList` 触发 `app:ready` 才隐藏 splash，初次进入不再先看到空壳再被填充。
+  - **Tauri backend (`lib.rs`)**：大量后端重写以支撑新结构；移除 `workspace_store`、`workspaceDataAtom` 等过时持久化。
+  - **设置页清理**：移除 `/settings/llm`（LLM 配置移出 app，由统一 platform 接管）。
+  - **GlobalHeader 瘦身**：删除 `GlobalFeatureTabs`、`CreateFeatureDialog`、`VerticalFeatureTabs`。
+  - **杂项**：`ProjectLogo` 提升到 `components/shared`；`.claude/`、`output/` 加入 `.gitignore`。
+
 ## 0.30.1
 
 ### Patch Changes
