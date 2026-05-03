@@ -39,8 +39,6 @@
 
 Local paths in prompts and chat messages now open inside Lovcode with a resizable preview pane. File references with `:line:column` jump directly to the target location, global search has scoped modes for text, IDs, and metadata, and document sidebars can be resized and restored.
 
-<img src="docs/images/claude-ai-import.png" alt="Claude.ai Import" width="100%">
-
 | Version | Highlights |
 |---------|------------|
 | **0.32.0** | Inline file preview for local path links with line/column reveal, directory browsing, and resizable preview pane; prompt path detection handles `@src/file.tsx:line:column(selector)` style references; global search gains All / Full text / Session ID / Details modes; document reader sidebars are now resizable and persisted |
