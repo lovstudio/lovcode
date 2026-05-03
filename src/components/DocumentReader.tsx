@@ -4,6 +4,7 @@ import { docReaderCollapsedGroupsAtom } from "../store";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { Group, Panel, Separator, useDefaultLayout, type PanelImperativeHandle } from "react-resizable-panels";
 import { warmAcademicTheme } from "../lib/codeTheme";
 // Lucide icons (no Radix equivalent)
 import { PanelLeftClose, PanelLeft, PanelRightClose, PanelRight, Maximize2, Minimize2 } from "lucide-react";
@@ -265,11 +266,7 @@ function DocumentListSidebar({
   };
 
   return (
-    <aside
-      className={`shrink-0 border-r border-border bg-background flex flex-col transition-all duration-200 overflow-hidden ${
-        isOpen ? "w-64" : "w-0"
-      }`}
-    >
+    <aside className="h-full border-r border-border bg-background flex flex-col overflow-hidden">
       {/* Header */}
       <div className="shrink-0 border-b border-border px-3 py-3 flex items-center gap-2">
         <button
@@ -346,7 +343,6 @@ function HeadingsSidebar({
   headings,
   activeHeading,
   onHeadingClick,
-  isOpen,
   onToggle,
 }: {
   headings: HeadingItem[];
@@ -360,11 +356,7 @@ function HeadingsSidebar({
   }
 
   return (
-    <aside
-      className={`shrink-0 border-l border-border bg-background flex flex-col transition-all duration-200 overflow-hidden ${
-        isOpen ? "w-56" : "w-0"
-      }`}
-    >
+    <aside className="h-full border-l border-border bg-background flex flex-col overflow-hidden">
       {/* Header */}
       <div className="shrink-0 border-b border-border px-4 py-3 flex items-center justify-between gap-2">
         <h3 className="font-serif font-semibold text-sm">On This Page</h3>
@@ -666,11 +658,19 @@ export function DocumentReader({
   onBack,
 }: DocumentReaderProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const leftPanelRef = useRef<PanelImperativeHandle>(null);
+  const rightPanelRef = useRef<PanelImperativeHandle>(null);
   const [leftPanelOpen, setLeftPanelOpen] = useState(true);
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
   const [activeHeading, setActiveHeading] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const headingRefs = useRef<Map<string, HTMLElement>>(new Map());
+
+  // Persist panel layout to localStorage
+  const { defaultLayout, onLayoutChange } = useDefaultLayout({
+    id: "doc-reader-layout",
+    storage: typeof window !== "undefined" ? window.localStorage : undefined as unknown as Storage,
+  });
 
   const progress = useReadingProgress(scrollContainerRef);
   const headings = useMemo(() => extractHeadings(content), [content]);
@@ -790,8 +790,18 @@ export function DocumentReader({
     if (hasNext) handleNavigate(currentIndex + 1);
   }, [hasNext, handleNavigate, currentIndex]);
 
-  const toggleLeftPanel = useCallback(() => setLeftPanelOpen((v) => !v), []);
-  const toggleRightPanel = useCallback(() => setRightPanelOpen((v) => !v), []);
+  const toggleLeftPanel = useCallback(() => {
+    const panel = leftPanelRef.current;
+    if (!panel) return;
+    if (panel.isCollapsed()) panel.expand();
+    else panel.collapse();
+  }, []);
+  const toggleRightPanel = useCallback(() => {
+    const panel = rightPanelRef.current;
+    if (!panel) return;
+    if (panel.isCollapsed()) panel.expand();
+    else panel.collapse();
+  }, []);
   const toggleFullscreen = useCallback(() => setIsFullscreen((v) => !v), []);
 
   const handleHeadingClick = useCallback((id: string) => {
@@ -882,26 +892,45 @@ export function DocumentReader({
       </header>
 
       {/* Main area with sidebars */}
-      <div className="flex-1 flex overflow-hidden relative">
+      <div className="flex-1 overflow-hidden relative">
         {/* Progress bar */}
         <ReadingProgressBar progress={progress} />
 
-        {/* Left sidebar - Documents */}
-        <DocumentListSidebar
-          documents={documents}
-          currentIndex={currentIndex}
-          sourceName={sourceName}
-          onSelect={handleNavigate}
-          onBack={onBack}
-          isOpen={leftPanelOpen}
-          onToggle={toggleLeftPanel}
-        />
+        <Group
+          orientation="horizontal"
+          defaultLayout={defaultLayout}
+          onLayoutChange={onLayoutChange}
+          className="h-full"
+        >
+          {/* Left sidebar - Documents */}
+          <Panel
+            panelRef={leftPanelRef}
+            id="left"
+            defaultSize={18}
+            minSize={12}
+            maxSize={40}
+            collapsible
+            collapsedSize={0}
+            onResize={(s) => setLeftPanelOpen(s.asPercentage > 0)}
+          >
+            <DocumentListSidebar
+              documents={documents}
+              currentIndex={currentIndex}
+              sourceName={sourceName}
+              onSelect={handleNavigate}
+              onBack={onBack}
+              isOpen={leftPanelOpen}
+              onToggle={toggleLeftPanel}
+            />
+          </Panel>
+          <Separator className="w-px bg-border hover:bg-primary/50 data-[separator-active=true]:bg-primary cursor-col-resize" />
 
-        {/* Main content area */}
+          {/* Main content area */}
+          <Panel id="main" minSize={30}>
         <main
           ref={scrollContainerRef}
           data-ref-scroll
-          className="flex-1 min-w-0 overflow-y-auto px-8 py-8 md:px-16"
+          className="h-full overflow-y-auto px-8 py-8 md:px-16"
         >
           {/* Book cover - only show on first document */}
           {currentIndex === 0 && !loading && (
@@ -966,15 +995,33 @@ export function DocumentReader({
           {/* Bottom padding */}
           <div className="h-16" />
         </main>
+          </Panel>
 
-        {/* Right sidebar - Headings */}
-        <HeadingsSidebar
-          headings={headings}
-          activeHeading={activeHeading}
-          onHeadingClick={handleHeadingClick}
-          isOpen={rightPanelOpen && headings.length > 0}
-          onToggle={toggleRightPanel}
-        />
+          {/* Right sidebar - Headings */}
+          {headings.length > 0 && (
+            <>
+              <Separator className="w-px bg-border hover:bg-primary/50 data-[separator-active=true]:bg-primary cursor-col-resize" />
+              <Panel
+                panelRef={rightPanelRef}
+                id="right"
+                defaultSize={16}
+                minSize={10}
+                maxSize={35}
+                collapsible
+                collapsedSize={0}
+                onResize={(s) => setRightPanelOpen(s.asPercentage > 0)}
+              >
+                <HeadingsSidebar
+                  headings={headings}
+                  activeHeading={activeHeading}
+                  onHeadingClick={handleHeadingClick}
+                  isOpen={rightPanelOpen}
+                  onToggle={toggleRightPanel}
+                />
+              </Panel>
+            </>
+          )}
+        </Group>
       </div>
     </div>
   );
