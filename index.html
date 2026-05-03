@@ -5,9 +5,84 @@
     <link rel="icon" type="image/svg+xml" href="/lovcode.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Lovcode - Vibe Coding Assistant</title>
+    <style>
+      /* Splash screen — paints on the very first frame, before React mounts.
+         Removed by main.tsx once <RouterProvider> renders. */
+      html, body { margin: 0; background: #F9F9F7; }
+      #splash {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483647;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 28px;
+        background: #F9F9F7;
+        transition: opacity 280ms ease;
+      }
+      #splash.fade { opacity: 0; pointer-events: none; }
+      #splash .logo {
+        width: 96px;
+        height: 96px;
+        animation: splash-breathe 1.8s ease-in-out infinite;
+      }
+      #splash .label {
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+        font-size: 12px;
+        letter-spacing: 0.02em;
+        color: rgba(24, 24, 24, 0.45);
+        margin-top: -8px;
+      }
+      #splash .bar {
+        width: 140px;
+        height: 2px;
+        background: rgba(24, 24, 24, 0.08);
+        border-radius: 1px;
+        overflow: hidden;
+      }
+      #splash .bar::after {
+        content: "";
+        display: block;
+        width: 40%;
+        height: 100%;
+        background: #CC785C;
+        border-radius: 1px;
+        animation: splash-slide 1.2s ease-in-out infinite;
+      }
+      @keyframes splash-breathe {
+        0%, 100% { opacity: 0.85; transform: scale(1); }
+        50%      { opacity: 1;    transform: scale(1.04); }
+      }
+      @keyframes splash-slide {
+        0%   { transform: translateX(-100%); }
+        100% { transform: translateX(350%); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #splash .logo { animation: none; }
+        #splash .bar::after { animation: splash-slide 2.4s linear infinite; }
+      }
+    </style>
   </head>
 
   <body>
+    <div id="splash">
+      <img class="logo" src="/logo.svg" alt="" />
+      <div class="label">Reading chat history…</div>
+      <div class="bar" role="progressbar" aria-label="Loading"></div>
+    </div>
+    <script>
+      // Auxiliary windows (transparent NSPanel for search overlay, prompt
+      // detail popups) must NOT show the main-window splash — they have no
+      // app shell and the beige background would paint a giant block.
+      (function () {
+        var hash = location.hash || "";
+        if (hash.indexOf("/search-overlay") !== -1 || hash.indexOf("/prompt-detail") !== -1) {
+          var s = document.getElementById("splash");
+          if (s) s.remove();
+        }
+      })();
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
     <script>

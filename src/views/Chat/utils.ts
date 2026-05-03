@@ -1,3 +1,4 @@
+import { useCallback } from "react";
 import { useAtomValue } from "jotai";
 import { originalChatAtom } from "../../store";
 
@@ -69,10 +70,10 @@ export function inferModelInfo(model: string | undefined | null): ModelInfo | nu
 /** Hook that returns a function to convert text based on global readable setting */
 export function useReadableText(): (text: string | null | undefined) => string {
   const readable = useAtomValue(originalChatAtom);
-  return (text) => {
+  return useCallback((text) => {
     if (!text) return "";
     return readable ? restoreSlashCommand(text) : text;
-  };
+  }, [readable]);
 }
 
 import type { Session, TitleSource } from "../../types";

@@ -13,7 +13,7 @@ export default function ChatMessagesPage() {
       projectPath=""
       sessionId={decodeURIComponent(sessionId)}
       summary=""
-      onBack={() => navigate(`/chat/${projectId}`)}
+      onBack={() => navigate(`/history/${projectId}`)}
     />
   );
 }

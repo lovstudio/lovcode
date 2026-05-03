@@ -3,7 +3,6 @@ import type { FeatureType, FeatureConfig } from "@/types";
 import { FeaturesLayout } from "./FeaturesLayout";
 import {
   Terminal,
-  Cpu,
   GitBranch,
   FileText,
   Settings2,
@@ -29,7 +28,6 @@ type Icon = ComponentType<SVGProps<SVGSVGElement>>;
 
 const ICONS: Partial<Record<FeatureType, Icon>> = {
   "basic-env": Terminal,
-  "basic-llm": Cpu,
   "basic-maas": Network,
   "basic-version": GitBranch,
   "basic-context": FileText,
@@ -42,11 +40,10 @@ const ICONS: Partial<Record<FeatureType, Icon>> = {
   "output-styles": Palette,
   statusline: SquareStack,
   extensions: Puzzle,
-  workspace: Layers3,
 };
 
-// Curated entry points — the three things a fresh user should touch first.
-const QUICK_START: FeatureType[] = ["basic-env", "basic-llm", "workspace"];
+// Curated entry points — what a fresh user should touch first.
+const QUICK_START: FeatureType[] = ["basic-env", "basic-maas"];
 
 function pad(n: number) {
   return n.toString().padStart(2, "0");

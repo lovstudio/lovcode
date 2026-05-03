@@ -1,5 +1,5 @@
-import type { Project, Session } from "../../types";
-import { useInvokeQuery } from "../../hooks";
+import type { Project } from "../../types";
+import { useInvokeQuery, useSessionsCache } from "../../hooks";
 import { ActivityHeatmap } from "./ActivityHeatmap";
 
 /**
@@ -11,7 +11,7 @@ import { ActivityHeatmap } from "./ActivityHeatmap";
  */
 export function ActivityCard({ className = "" }: { className?: string }) {
   const { data: projects = [] } = useInvokeQuery<Project[]>(["projects"], "list_projects");
-  const { data: sessions = [] } = useInvokeQuery<Session[]>(["sessions"], "list_all_sessions");
+  const sessions = useSessionsCache();
   const { data: stats } = useInvokeQuery<{
     daily: Record<string, number>;
     hourly: Record<string, number>;

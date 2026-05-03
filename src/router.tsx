@@ -39,7 +39,7 @@ const router = createHashRouter(routesWithLayout);
 
 export function AppRouter() {
   return (
-    <Suspense fallback={<LoadingState message="Loading..." />}>
+    <Suspense fallback={<LoadingState message="Loading app…" />}>
       <RouterProvider router={router} />
     </Suspense>
   );

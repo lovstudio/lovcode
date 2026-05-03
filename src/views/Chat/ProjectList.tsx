@@ -1,4 +1,5 @@
-import { useState, useMemo, useEffect, useRef, useLayoutEffect } from "react";
+import { useState, useMemo, useEffect, useRef, useLayoutEffect, useCallback, memo } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -27,13 +28,13 @@ import {
 } from "../../store";
 import { useAppConfig } from "../../context";
 import { useReadableText, formatTokens, inferModelInfo, resolveSessionLabel, titleSourceBadge } from "./utils";
-import { useInvokeQuery, useQueryClient } from "../../hooks";
+import { useInvokeQuery, useQueryClient, useStreamedSessions } from "../../hooks";
 import { CollapsibleContent } from "./CollapsibleContent";
 import { ContentBlockRenderer } from "./ContentBlockRenderer";
 import { HighlightText } from "./HighlightText";
 import { useCwdValidity } from "./useCwdValidity";
 import { RelocateSessionDialog } from "./RelocateSessionDialog";
-import { ProjectLogo } from "../Workspace/ProjectLogo";
+import { ProjectLogo } from "../../components/shared/ProjectLogo";
 import { ActivityCard } from "../../components/home";
 import {
   DropdownMenu,
@@ -108,7 +109,11 @@ export function ProjectList({ onSelectProject, onSelectSession: _onSelectSession
   const queryClient = useQueryClient();
 
   const { data: projects = [], isLoading: loadingProjects } = useInvokeQuery<Project[]>(["projects"], "list_projects");
-  const { data: allSessions = [], isLoading: loadingSessions } = useInvokeQuery<Session[]>(["sessions"], "list_all_sessions");
+  // Streamed: first batch (~200 sessions) lands within a few hundred ms so the
+  // splash can fade and the list paints, instead of waiting for the full 1500-row
+  // IPC roundtrip + JSON.parse. The hook also writes the final set into
+  // react-query's ["sessions"] cache so other consumers (search, etc.) get it.
+  const { sessions: allSessions, initialLoading: loadingSessions } = useStreamedSessions();
 
   const [importing, setImporting] = useState(false);
   // Two-level tab model:
@@ -133,6 +138,48 @@ export function ProjectList({ onSelectProject, onSelectSession: _onSelectSession
     [collapsedGroupsArr],
   );
   const [selectedSessionRaw, setSelectedSessionRaw] = useState<Session | null>(null);
+
+  // Auto-select a session when navigated here with a hint (e.g. from global search).
+  // Source: location.state.selectSessionId. Cleared after consumption so a
+  // back→forward navigation doesn't re-trigger selection.
+  const location = useLocation();
+  const navigate = useNavigate();
+  const sidebarScrollRef = useRef<HTMLDivElement | null>(null);
+  const pendingScrollToSessionRef = useRef<string | null>(null);
+  useEffect(() => {
+    const hintId = (location.state as { selectSessionId?: string } | null)?.selectSessionId;
+    if (!hintId || allSessions.length === 0) return;
+    const s = allSessions.find((x) => x.id === hintId);
+    if (!s) return;
+    setSelectedSessionRaw(s);
+    // Expand sections / project group so the target row is in the DOM.
+    setRecentCollapsed(false);
+    setPinnedCollapsed(false);
+    setCollapsedGroupsArr((prev) => {
+      if (prev === null) return prev;
+      if (!prev.includes(s.project_id)) return prev;
+      return prev.filter((id) => id !== s.project_id);
+    });
+    pendingScrollToSessionRef.current = hintId;
+    navigate(location.pathname, { replace: true, state: null });
+  }, [location.state, location.pathname, allSessions, navigate, setRecentCollapsed, setPinnedCollapsed, setCollapsedGroupsArr]);
+
+  // After sidebar re-renders with the target row visible, scroll it into view.
+  // Re-runs on every sidebar shape change until the row exists, then clears.
+  useEffect(() => {
+    const id = pendingScrollToSessionRef.current;
+    if (!id) return;
+    const scroller = sidebarScrollRef.current;
+    if (!scroller) return;
+    const row = scroller.querySelector<HTMLElement>(`[data-session-id="${CSS.escape(id)}"]`);
+    if (!row) return;
+    const scrollerRect = scroller.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    const delta = rowRect.top - scrollerRect.top - scrollerRect.height / 2 + rowRect.height / 2;
+    scroller.scrollTo({ top: scroller.scrollTop + delta, behavior: "smooth" });
+    pendingScrollToSessionRef.current = null;
+  });
+
   // Always re-derive the selected session from the live `allSessions` array so that
   // when cwd repair / migration moves a session to a new project slug, the right panel
   // picks up the new object (with updated project_path / project_id) automatically.
@@ -279,23 +326,15 @@ export function ProjectList({ onSelectProject, onSelectSession: _onSelectSession
     }
   };
 
-  // Auto-sync once when the sessions list becomes available.
-  // Also cleans up legacy state: previous versions of this code merged app
-  // starredIds INTO pinnedIds, so users may have stale app-session ids in
-  // their localStorage. Strip them on first run so the new dual-store model
-  // is consistent.
+  // Pull Claude desktop app's starredIds once after sessions load.
+  // (Removed: legacy cleanup that stripped app-source ids from pinnedIds —
+  // it kept silently wiping user pins whenever Claude desktop reclassified
+  // a CLI session as app-code. Pins are user data; never auto-delete them.)
   const syncedRef = useRef(false);
   useEffect(() => {
     if (syncedRef.current) return;
     if (allSessions.length === 0) return;
     syncedRef.current = true;
-    const appSessionIdSet = new Set(
-      allSessions.filter((s) => s.source.startsWith("app")).map((s) => s.id)
-    );
-    setPinnedIds((prev) => {
-      const cleaned = prev.filter((id) => !appSessionIdSet.has(id));
-      return cleaned.length === prev.length ? prev : cleaned;
-    });
     syncPinsFromApp();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allSessions]);
@@ -345,6 +384,15 @@ export function ProjectList({ onSelectProject, onSelectSession: _onSelectSession
 
   const loading = loadingProjects || loadingSessions;
 
+  // Hold the index.html splash up until the initial session list is ready,
+  // then fade. Only the first transition matters — re-fetches don't replay.
+  const splashDismissedRef = useRef(false);
+  useEffect(() => {
+    if (loading || splashDismissedRef.current) return;
+    splashDismissedRef.current = true;
+    window.dispatchEvent(new Event("app:ready"));
+  }, [loading, allSessions.length, projects.length]);
+
   // Sessions visible under the current data source — used for the header counter
   // so it matches what the user actually sees in the list.
   const visibleSessions = useMemo(
@@ -354,13 +402,19 @@ export function ProjectList({ onSelectProject, onSelectSession: _onSelectSession
   );
 
   const sortedProjects = useMemo(() => {
+    // Pre-build "project_id has any session of current dataSource" in O(n)
+    // so the project filter below is O(projects) instead of O(n*p).
+    const projectHasMatch = new Set<string>();
+    if (dataSource !== "all") {
+      for (const s of allSessions) {
+        if (matchesDataSource(s)) projectHasMatch.add(s.project_id);
+      }
+    }
+
     const filtered = projects.filter((p) => {
       if (p.session_count === 0) return false;
       if (dataSource === "all") return true;
-      // A project is visible in this tab iff at least one of its sessions
-      // belongs to the current data source. Keeps project-vs-session logic
-      // in one place — no more `id === "-claude-ai"` magic strings here.
-      return allSessions.some((s) => s.project_id === p.id && matchesDataSource(s));
+      return projectHasMatch.has(p.id);
     });
     return [...filtered].sort((a, b) => {
       switch (sortBy) {
@@ -369,36 +423,47 @@ export function ProjectList({ onSelectProject, onSelectSession: _onSelectSession
         case "name": return a.path.localeCompare(b.path);
       }
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projects, allSessions, sortBy, dataSource]);
 
   const sessionsByProject = useMemo(() => {
-    const map = new Map<string, Session[]>();
     const normalizePath = (p: string) => p.replace(/\/+$/, "");
 
+    // O(n) bucket pass: group filtered sessions by their normalized
+    // project_path. Avoids the previous O(projects × sessions) double loop
+    // that would freeze the UI thread for ~1s with 1000+ sessions.
+    const buckets = new Map<string, Session[]>();
+    for (const s of allSessions) {
+      if (!s.project_path) continue;
+      if (hideEmptySessions && s.rounds === 0) continue;
+      if (!matchesDataSource(s)) continue;
+      if (effectivePinnedSet.has(s.id)) continue; // shown in pinned section
+      const key = normalizePath(s.project_path);
+      const list = buckets.get(key);
+      if (list) list.push(s);
+      else buckets.set(key, [s]);
+    }
+
+    const sortFn = (a: Session, b: Session) => {
+      switch (sortBy) {
+        case "recent": return b.last_modified - a.last_modified;
+        case "sessions": return b.rounds - a.rounds;
+        case "name": return (a.summary || "").localeCompare(b.summary || "");
+      }
+    };
+
+    const map = new Map<string, Session[]>();
     for (const project of sortedProjects) {
-      const projectPathNorm = normalizePath(project.path);
-      const sessions = allSessions
-        .filter((s) => {
-          if (!s.project_path) return false;
-          if (hideEmptySessions && s.rounds === 0) return false;
-          if (!matchesDataSource(s)) return false;
-          if (effectivePinnedSet.has(s.id)) return false; // surfaced in the top Pinned section
-          return normalizePath(s.project_path) === projectPathNorm;
-        })
-        .sort((a, b) => {
-          switch (sortBy) {
-            case "recent": return b.last_modified - a.last_modified;
-            case "sessions": return b.rounds - a.rounds;
-            case "name": return (a.summary || "").localeCompare(b.summary || "");
-          }
-        });
-      map.set(project.id, sessions);
+      const list = buckets.get(normalizePath(project.path)) ?? [];
+      list.sort(sortFn);
+      map.set(project.id, list);
     }
     return map;
   }, [sortedProjects, allSessions, sortBy, hideEmptySessions, dataSource, effectivePinnedSet]);
 
-  // Pinned sessions surface as a dedicated top group (independent of grouped/flat mode).
-  // Filtered the same way as the main list so the active data source / hide-empty toggles still apply.
+  // Pinned sessions surface as a dedicated top group, independent of the
+  // active data-source tab — a pin is a pin, switching tabs shouldn't hide it.
+  // Still respects `hideEmptySessions` because that's an explicit user toggle.
   const pinnedSessions = useMemo(() => {
     if (effectivePinnedSet.size === 0) return [];
     const seen = new Set<string>();
@@ -408,10 +473,10 @@ export function ProjectList({ onSelectProject, onSelectSession: _onSelectSession
         if (seen.has(s.id)) return false; // defensive dedupe — backend may emit dupes for same cliSessionId
         seen.add(s.id);
         if (hideEmptySessions && s.rounds === 0) return false;
-        return matchesDataSource(s);
+        return true;
       })
       .sort((a, b) => b.last_modified - a.last_modified);
-  }, [allSessions, effectivePinnedSet, hideEmptySessions, dataSource]);
+  }, [allSessions, effectivePinnedSet, hideEmptySessions]);
 
   const flatSessions = useMemo(() => {
     if (grouped) return [];
@@ -463,9 +528,15 @@ export function ProjectList({ onSelectProject, onSelectSession: _onSelectSession
   };
 
   if (loading) {
+    const what = loadingSessions && loadingProjects
+      ? "sessions and projects"
+      : loadingSessions
+        ? "sessions"
+        : "projects";
     return (
-      <div className="flex items-center justify-center h-full">
-        <p className="text-muted-foreground">Loading...</p>
+      <div className="flex flex-col items-center justify-center h-full gap-2">
+        <p className="text-muted-foreground">Reading {what}…</p>
+        <p className="text-xs text-muted-foreground/60">~/.claude/projects</p>
       </div>
     );
   }
@@ -473,7 +544,7 @@ export function ProjectList({ onSelectProject, onSelectSession: _onSelectSession
   return (
     <div className="flex h-full">
       {/* Left Panel: Project Tree */}
-      <div className="w-80 shrink-0 border-r border-border overflow-y-auto overscroll-contain">
+      <div ref={sidebarScrollRef} className="w-80 shrink-0 border-r border-border overflow-y-auto overscroll-contain">
         <div className="px-4 py-4">
           <div className="flex items-center justify-between mb-1">
             <h2 className="font-serif text-lg font-semibold text-ink">History</h2>
@@ -875,6 +946,7 @@ function SessionItemButton({
   return (
     <div
       onClick={onClick}
+      data-session-id={session.id}
       className={`group relative w-full text-left flex items-center gap-1.5 px-2 py-1 rounded text-xs transition-colors min-w-0 cursor-pointer ${
         isSelected
           ? "bg-primary/10 text-ink"
@@ -1058,14 +1130,13 @@ const PROMPT_HEAD_LINES = 3;
 const PROMPT_TAIL_LINES = 2;
 const PROMPT_COMPRESS_THRESHOLD = PROMPT_HEAD_LINES + PROMPT_TAIL_LINES + 1;
 
-function compressPromptText(text: string): { compressed: string; omittedLines: number } | null {
+function compressPromptText(text: string): { head: string; tail: string; omittedLines: number } | null {
   const lines = text.split("\n");
   if (lines.length < PROMPT_COMPRESS_THRESHOLD) return null;
-  const head = lines.slice(0, PROMPT_HEAD_LINES);
-  const tail = lines.slice(-PROMPT_TAIL_LINES);
   const omitted = lines.length - PROMPT_HEAD_LINES - PROMPT_TAIL_LINES;
   return {
-    compressed: [...head, `··· ${omitted} 行省略 ···`, ...tail].join("\n"),
+    head: lines.slice(0, PROMPT_HEAD_LINES).join("\n"),
+    tail: lines.slice(-PROMPT_TAIL_LINES).join("\n"),
     omittedLines: omitted,
   };
 }
@@ -1091,7 +1162,7 @@ async function openPromptDetailWindow(content: string, title: string) {
   }
 }
 
-function MessageGroupCard({
+const MessageGroupCard = memo(function MessageGroupCard({
   group,
   originalChat,
   markdownPreview,
@@ -1120,17 +1191,12 @@ function MessageGroupCard({
     [group, markdownPreview, originalChat],
     expandMessages,
   );
-  const [hovered, setHovered] = useState(false);
-  const showHover = hovered ? "opacity-100" : "opacity-0";
-
   const isUser = group[0].role === "user";
   const userPromptText = isUser ? groupContent : "";
   const userPromptCompressed = isUser ? compressPromptText(userPromptText) : null;
 
   return (
     <div
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
       onDoubleClick={
         isUser
           ? () => {
@@ -1144,7 +1210,7 @@ function MessageGroupCard({
             }
           : undefined
       }
-      className={`relative py-1.5 pl-4 pr-10 border-b ${
+      className={`group/msg relative py-1.5 pl-4 pr-10 border-b ${
         isUser
           ? "border-border bg-card before:absolute before:inset-0 before:bg-primary/[0.07] before:pointer-events-none"
           : "bg-card border-border/40"
@@ -1158,9 +1224,24 @@ function MessageGroupCard({
           </div>
         )}
         {isUser ? (
-          <div className="text-sm leading-relaxed text-ink whitespace-pre-wrap break-words select-text cursor-text">
-            {userPromptCompressed ? userPromptCompressed.compressed : userPromptText}
-          </div>
+          userPromptCompressed ? (
+            <div className="text-sm leading-relaxed text-ink select-text cursor-text">
+              <div className="whitespace-pre-wrap break-words">{userPromptCompressed.head}</div>
+              <div
+                className="my-1 flex items-center gap-2 text-[10px] text-muted-foreground/60 select-none"
+                aria-label={`${userPromptCompressed.omittedLines} 行省略，双击展开`}
+              >
+                <span className="flex-1 border-t border-dashed border-border/60" />
+                <span className="font-mono">··· {userPromptCompressed.omittedLines} 行省略 · 双击展开 ···</span>
+                <span className="flex-1 border-t border-dashed border-border/60" />
+              </div>
+              <div className="whitespace-pre-wrap break-words">{userPromptCompressed.tail}</div>
+            </div>
+          ) : (
+            <div className="text-sm leading-relaxed text-ink whitespace-pre-wrap break-words select-text cursor-text">
+              {userPromptText}
+            </div>
+          )
         ) : (
           <div
             ref={ref}
@@ -1188,7 +1269,7 @@ function MessageGroupCard({
           </div>
         )}
       </div>
-      <div className={`absolute top-2 right-3 transition-opacity ${showHover}`}>
+      <div className="absolute top-2 right-3 opacity-0 group-hover/msg:opacity-100 focus-within:opacity-100 transition-opacity">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
@@ -1239,7 +1320,7 @@ function MessageGroupCard({
       </div>
     </div>
   );
-}
+});
 
 function CwdMissingBanner({ from }: { from: string }) {
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -1414,9 +1495,9 @@ function SessionDetail({ session, onClose, highlight }: { session: Session; onCl
     [messages],
   );
 
-  const handleCopyContent = (content: string) => {
+  const handleCopyContent = useCallback((content: string) => {
     invoke("copy_to_clipboard", { text: content });
-  };
+  }, []);
 
   const contentRef = useRef<HTMLDivElement>(null);
   const [activeMatch, setActiveMatch] = useState(0);
@@ -1548,7 +1629,7 @@ function SessionDetail({ session, onClose, highlight }: { session: Session; onCl
               </button>
             </div>
           )}
-          <DropdownMenu>
+          <DropdownMenu modal={false}>
             <DropdownMenuTrigger asChild>
               <button className="p-1.5 rounded-lg text-muted-foreground hover:bg-card-alt">
                 <DotsHorizontalIcon width={16} />

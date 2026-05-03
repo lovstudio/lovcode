@@ -13,9 +13,3 @@ export const shortenPathsAtom = atomWithStorage("lovcode:shortenPaths", true);
 // 用户档案
 export const profileAtom = atomWithStorage<UserProfile>("lovcode:profile", { nickname: "", avatarUrl: "" });
 
-// Feature Tabs 布局模式
-export type FeatureTabsLayout = "horizontal" | "vertical";
-export const featureTabsLayoutAtom = atomWithStorage<FeatureTabsLayout>("lovcode:featureTabsLayout", "vertical");
-
-// 纵向 sidebar 宽度
-export const verticalTabsSidebarWidthAtom = atomWithStorage<number>("lovcode:verticalTabsSidebarWidth", 220);

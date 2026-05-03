@@ -14,11 +14,14 @@ export default function KnowledgeDistillPage() {
 
   const handleFeatureClick = (feature: FeatureType) => {
     if (feature === "kb-distill") navigate("/knowledge/distill");
-    else if (feature === "kb-reference") navigate("/knowledge/reference");
   };
 
   return (
-    <KnowledgeLayout currentFeature="kb-distill" onFeatureClick={handleFeatureClick}>
+    <KnowledgeLayout
+      currentFeature="kb-distill"
+      onFeatureClick={handleFeatureClick}
+      onSourceClick={(sourceId) => navigate(`/knowledge/source/${encodeURIComponent(sourceId)}`)}
+    >
       <DistillView
         onSelect={(doc) => navigate(`/knowledge/distill/${encodeURIComponent(doc.file)}`)}
         watchEnabled={watchEnabled}

@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { atom, useAtom, useAtomValue } from "jotai";
+import { useNavigate } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
-import { Window } from "@tauri-apps/api/window";
+import { Window, getCurrentWindow } from "@tauri-apps/api/window";
 import { emit, listen } from "@tauri-apps/api/event";
 import { register, unregister, isRegistered } from "@tauri-apps/plugin-global-shortcut";
 import { MagnifyingGlassIcon } from "@radix-ui/react-icons";
-import { useInvokeQuery } from "../hooks";
-import { viewAtom, globalChatSearchHotkeyAtom } from "../store";
+import { useSessionsCache } from "../hooks";
+import { globalChatSearchHotkeyAtom } from "../store";
 import type { Session } from "../types";
 import { useReadableText, formatDate } from "../views/Chat/utils";
 import { HighlightText } from "../views/Chat/HighlightText";
@@ -36,11 +37,13 @@ async function toggleSearchWindow() {
 
 export function GlobalChatSearch() {
   const [open, setOpen] = useAtom(chatSearchOpenAtom);
-  const [, setView] = useAtom(viewAtom);
+  const navigate = useNavigate();
   const systemHotkey = useAtomValue(globalChatSearchHotkeyAtom);
   const toReadable = useReadableText();
 
-  const { data: allSessions = [] } = useInvokeQuery<Session[]>(["sessions"], "list_all_sessions");
+  // Read from the cache populated by ProjectList's useStreamedSessions instead
+  // of triggering our own non-streamed list_all_sessions on every layout mount.
+  const allSessions = useSessionsCache();
 
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Session[] | null>(null);
@@ -57,16 +60,14 @@ export function GlobalChatSearch() {
       sessionId: string;
       summary: string | null;
     }>("open-chat", (e) => {
-      setView({
-        type: "chat-messages",
-        projectId: e.payload.projectId,
-        projectPath: e.payload.projectPath,
-        sessionId: e.payload.sessionId,
-        summary: e.payload.summary,
-      });
+      navigate("/history", { state: { selectSessionId: e.payload.sessionId } });
+      const main = getCurrentWindow();
+      main.show().catch(() => {});
+      main.unminimize().catch(() => {});
+      main.setFocus().catch(() => {});
     });
     return () => { unlisten.then((fn) => fn()).catch(() => {}); };
-  }, [setView]);
+  }, [navigate]);
 
   // Window-level ⌘K. When the system hotkey is on, we still keep this so that
   // pressing ⌘K while the main window is focused brings up the overlay
@@ -174,13 +175,7 @@ export function GlobalChatSearch() {
       inputRef={inputRef}
       toReadable={toReadable}
       onSelect={(s) => {
-        setView({
-          type: "chat-messages",
-          projectId: s.project_id,
-          projectPath: s.project_path || "",
-          sessionId: s.id,
-          summary: s.summary,
-        });
+        navigate("/history", { state: { selectSessionId: s.id } });
         setOpen(false);
       }}
       onClose={() => setOpen(false)}

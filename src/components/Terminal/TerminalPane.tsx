@@ -6,7 +6,7 @@ import {
   ExclamationTriangleIcon,
   InfoCircledIcon,
 } from "@radix-ui/react-icons";
-import { useNavigate } from "@/hooks";
+import { useNavigate } from "react-router-dom";
 import {
   Dialog,
   DialogContent,
@@ -789,7 +789,7 @@ export function TerminalPane({
                 variant="outline"
                 onClick={() => {
                   setDiagnosticOpen(false);
-                  navigate({ type: "basic-version" });
+                  navigate("/settings/version");
                 }}
               >
                 Open CC Version
@@ -800,17 +800,17 @@ export function TerminalPane({
                 variant="outline"
                 onClick={() => {
                   setDiagnosticOpen(false);
-                  navigate({ type: "basic-llm" });
+                  navigate("/settings/maas");
                 }}
               >
-                Open LLM Providers
+                Open MaaS Registry
               </Button>
             )}
             <Button
               variant="outline"
               onClick={() => {
                 setDiagnosticOpen(false);
-                navigate({ type: "basic-env" });
+                navigate("/settings/env");
               }}
             >
               Open Environment

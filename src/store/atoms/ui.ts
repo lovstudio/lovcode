@@ -43,7 +43,6 @@ function parseUrlToView(hash: string): View {
   const [first, second] = segments;
 
   switch (first) {
-    case "workspace": return { type: "workspace" };
     case "features": return { type: "features" };
     case "annual-report-2025": return { type: "annual-report-2025" };
     case "mcp": return { type: "mcp" };
@@ -57,20 +56,23 @@ function parseUrlToView(hash: string): View {
       if (!second) return { type: "settings" };
       switch (second) {
         case "env": return { type: "basic-env" };
-        case "llm": return { type: "basic-llm" };
         case "maas": return { type: "basic-maas" };
         case "version": return { type: "basic-version" };
         case "context": return { type: "basic-context" };
         default: return { type: "settings" };
       }
     }
-    case "chat": {
+    case "history": {
       if (!second) return { type: "chat-projects" };
       return { type: "chat-sessions", projectId: decodeURIComponent(second), projectPath: "" };
     }
     case "knowledge": {
       if (second === "distill") return { type: "kb-distill" };
-      if (second === "reference") return { type: "kb-reference" };
+      if (second === "source" && segments[2]) {
+        const sourceId = decodeURIComponent(segments[2]);
+        if (segments[3]) return { type: "kb-source-doc", sourceId, docPath: decodeURIComponent(segments.slice(3).join("/")) };
+        return { type: "kb-source", sourceId };
+      }
       return { type: "home" };
     }
     case "marketplace": {

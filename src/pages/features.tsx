@@ -7,9 +7,8 @@ export default function FeaturesPage() {
 
   const handleFeatureClick = (feature: FeatureType) => {
     const routes: Record<FeatureType, string> = {
-      "chat": "/chat",
+      "chat": "/history",
       "basic-env": "/settings/env",
-      "basic-llm": "/settings/llm",
       "basic-maas": "/settings/maas",
       "basic-version": "/settings/version",
       "basic-context": "/settings/context",
@@ -22,8 +21,6 @@ export default function FeaturesPage() {
       "output-styles": "/output-styles",
       "statusline": "/statusline",
       "kb-distill": "/knowledge/distill",
-      "kb-reference": "/knowledge/reference",
-      "workspace": "/workspace",
       "features": "/features",
       "marketplace": "/marketplace",
       "extensions": "/extensions",

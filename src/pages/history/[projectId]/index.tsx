@@ -11,8 +11,8 @@ export default function ChatSessionsPage() {
     <SessionList
       projectId={decodeURIComponent(projectId)}
       projectPath=""
-      onBack={() => navigate("/chat")}
-      onSelect={(s) => navigate(`/chat/${encodeURIComponent(s.project_id)}/${encodeURIComponent(s.id)}`)}
+      onBack={() => navigate("/history")}
+      onSelect={(s) => navigate(`/history/${encodeURIComponent(s.project_id)}/${encodeURIComponent(s.id)}`)}
     />
   );
 }

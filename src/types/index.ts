@@ -6,10 +6,8 @@ export * from "./maas";
 
 export type FeatureType =
   | "chat"
-  | "workspace"
   | "features"
   | "basic-env"
-  | "basic-llm"
   | "basic-maas"
   | "basic-version"
   | "basic-context"
@@ -24,15 +22,34 @@ export type FeatureType =
   | "marketplace"
   | "extensions"
   | "kb-distill"
-  | "kb-reference"
   | "events";
+
+// ============================================================================
+// Doc Sources (sources.json registry: vault | github | symlink | bundled)
+// ============================================================================
+
+export type DocSourceKind = "symlink" | "github" | "vault" | "bundled";
+
+export interface DocSource {
+  id: string;
+  name: string;
+  kind: DocSourceKind;
+  path: string;
+  hidden: boolean;
+  order: number;
+  origin?: { repo: string; sub_path?: string; fetched_at: string };
+}
+
+export type DocNode =
+  | { type: "dir"; name: string; path: string; children: DocNode[] }
+  | { type: "file"; name: string; path: string };
 
 export interface FeatureConfig {
   type: FeatureType;
   label: string;
   description: string;
   available: boolean;
-  group: "history" | "basic" | "config" | "knowledge";
+  group: "basic" | "config" | "knowledge";
 }
 
 // ============================================================================
@@ -260,13 +277,11 @@ export type TemplateCategory =
 
 export type View =
   | { type: "home" }
-  | { type: "workspace"; projectId?: string; featureId?: string; mode?: "terminal" | "dashboard" }
   | { type: "features" }
   | { type: "chat-projects" }
   | { type: "chat-sessions"; projectId: string; projectPath: string }
   | { type: "chat-messages"; projectId: string; projectPath: string; sessionId: string; summary: string | null }
   | { type: "basic-env" }
-  | { type: "basic-llm" }
   | { type: "basic-maas" }
   | { type: "basic-version" }
   | { type: "basic-context" }
@@ -282,8 +297,8 @@ export type View =
   | { type: "statusline" }
   | { type: "kb-distill" }
   | { type: "kb-distill-detail"; document: DistillDocument }
-  | { type: "kb-reference" }
-  | { type: "kb-reference-doc"; source: string; docIndex: number }
+  | { type: "kb-source"; sourceId: string }
+  | { type: "kb-source-doc"; sourceId: string; docPath: string }
   | { type: "marketplace"; category?: TemplateCategory }
   | { type: "template-detail"; template: TemplateComponent; category: TemplateCategory }
   | { type: "feature-template-detail"; template: TemplateComponent; category: TemplateCategory; fromFeature: FeatureType; localPath?: string; isInstalled?: boolean }

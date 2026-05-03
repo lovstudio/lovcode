@@ -42,11 +42,11 @@ export function ProjectPathLabel({ path, className = "" }: ProjectPathLabelProps
     <ContextMenu modal={false}>
       <ContextMenuTrigger asChild>
         <span
-          className={`inline-flex items-center gap-1 cursor-default ${className}`}
+          className={`inline-flex items-center gap-1 min-w-0 max-w-full cursor-default ${className}`}
           title={tooltip}
         >
-          <FolderOpen className="w-3 h-3 opacity-60" />
-          <span>{text}</span>
+          <FolderOpen className="w-3 h-3 opacity-60 shrink-0" />
+          <span className="truncate min-w-0">{text}</span>
         </span>
       </ContextMenuTrigger>
       <ContextMenuContent onCloseAutoFocus={(e) => e.preventDefault()}>

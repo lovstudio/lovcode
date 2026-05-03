@@ -1,5 +1,5 @@
 // App atoms
-export { sidebarCollapsedAtom, marketplaceCategoryAtom, shortenPathsAtom, profileAtom, featureTabsLayoutAtom, verticalTabsSidebarWidthAtom, type FeatureTabsLayout } from "./atoms/app";
+export { sidebarCollapsedAtom, marketplaceCategoryAtom, shortenPathsAtom, profileAtom } from "./atoms/app";
 
 // UI atoms
 export { selectedFileAtom, fileViewModeAtom, activePanelIdAtom, navigationStateAtom, viewAtom, viewHistoryAtom, historyIndexAtom } from "./atoms/ui";
@@ -25,7 +25,7 @@ export {
 } from "./atoms/chat";
 
 // Settings atoms
-export { routerTestStatusAtom, routerTestMessageAtom, globalChatSearchHotkeyAtom } from "./atoms/settings";
+export { globalChatSearchHotkeyAtom } from "./atoms/settings";
 
 // Commands atoms
 export {
@@ -34,18 +34,7 @@ export {
 } from "./atoms/commands";
 
 // Knowledge atoms
-export {
-  referenceCollapsedGroupsAtom, referenceExpandedSourceAtom, referenceScrollPositionAtom,
-} from "./atoms/knowledge";
-
-// Workspace atoms
-export {
-  primaryFeatureAtom,
-  workspaceDataAtom, workspaceLoadingAtom, collapsedProjectGroupsAtom,
-  featureSidebarExpandedPanelsAtom, featureSidebarPinnedExpandedAtom, featureSidebarFilesExpandedAtom,
-  sidebarModeAtom, dashboardSessionsVisibleAtom,
-  type SidebarMode,
-} from "./atoms/workspace";
+export { sourceCollapsedDirsAtom } from "./atoms/knowledge";
 
 // Component atoms
 export { collapsibleStatesAtom, docReaderCollapsedGroupsAtom } from "./atoms/components";

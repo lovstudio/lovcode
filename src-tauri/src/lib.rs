@@ -2,7 +2,6 @@ mod claude_web_sync;
 mod diagnostics;
 mod hook_watcher;
 mod pty_manager;
-mod workspace_store;
 
 use jieba_rs::Jieba;
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
@@ -20,6 +19,7 @@ use tantivy::query::QueryParser;
 use tantivy::schema::{self, Value as TantivyValue, *};
 use tantivy::tokenizer::{LowerCaser, TextAnalyzer, Token, TokenStream, Tokenizer};
 use tantivy::{doc, Index, IndexWriter, ReloadPolicy};
+use tauri::ipc::Channel;
 use tauri::{Emitter, Manager};
 
 #[cfg(target_os = "macos")]
@@ -165,7 +165,7 @@ pub struct Project {
     pub last_active: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SessionUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -183,22 +183,25 @@ pub struct SessionUsage {
     pub context_tokens: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
     pub project_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub project_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     /// Last user-typed prompt (Claude Code's `lastPrompt`). Used as a
     /// last-resort label when no title/summary exists. Never substituted
     /// into `title` or `summary` — kept as a separate field so the UI can
     /// display it with a distinct visual treatment.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_prompt: Option<String>,
     /// Where `title`/fallback came from when the UI renders a label.
     /// Values: "custom" | "ai" | "slug" | "summary" | "prompt" | "none"
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title_source: Option<String>,
     /// User-initiated conversation rounds (one per user message).
     pub rounds: usize,
@@ -208,6 +211,7 @@ pub struct Session {
     pub message_count: usize,
     pub created_at: u64,
     pub last_modified: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<SessionUsage>,
     /// One of:
     ///   "cli"        — local Claude Code CLI session (~/.claude/projects/<encoded>/<uuid>.jsonl)
@@ -228,9 +232,16 @@ pub enum ContentBlock {
     #[serde(rename = "text")]
     Text { text: String },
     #[serde(rename = "tool_use")]
-    ToolUse { id: String, name: String, summary: String },
+    ToolUse {
+        id: String,
+        name: String,
+        summary: String,
+    },
     #[serde(rename = "tool_result")]
-    ToolResult { tool_use_id: String, content: String },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+    },
     #[serde(rename = "thinking")]
     Thinking { thinking: String },
 }
@@ -241,8 +252,8 @@ pub struct Message {
     pub role: String,
     pub content: String,
     pub timestamp: String,
-    pub is_meta: bool,  // slash command 展开的内容
-    pub is_tool: bool,  // tool_use 或 tool_result
+    pub is_meta: bool, // slash command 展开的内容
+    pub is_tool: bool, // tool_use 或 tool_result
     pub line_number: usize,
     pub content_blocks: Option<Vec<ContentBlock>>,
 }
@@ -331,8 +342,8 @@ pub struct McpServer {
     pub description: Option<String>,
     #[serde(rename = "type")]
     pub server_type: Option<String>, // "http" | "sse" | "stdio"
-    pub url: Option<String>,         // for http/sse servers
-    pub command: Option<String>,     // for stdio servers
+    pub url: Option<String>,     // for http/sse servers
+    pub command: Option<String>, // for stdio servers
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
 }
@@ -568,8 +579,7 @@ fn load_maas_registry() -> Result<Vec<MaasProvider>, String> {
         return Ok(default_maas_registry());
     }
     let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let saved: Vec<MaasProvider> =
-        serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    let saved: Vec<MaasProvider> = serde_json::from_str(&content).map_err(|e| e.to_string())?;
 
     // Reconcile against defaults so built-in order is canonical and any
     // accidentally-deleted built-in is restored. Strategy:
@@ -643,7 +653,10 @@ fn encode_project_path(path: &str) -> String {
 /// So `/.` becomes `--`, but `-` in directory names is NOT escaped
 fn decode_project_path(id: &str) -> String {
     // Check for custom display name (used by imported data sources)
-    let display_name_file = get_claude_dir().join("projects").join(id).join(".display_name");
+    let display_name_file = get_claude_dir()
+        .join("projects")
+        .join(id)
+        .join(".display_name");
     if let Ok(name) = fs::read_to_string(&display_name_file) {
         let name = name.trim();
         if !name.is_empty() {
@@ -811,12 +824,14 @@ async fn list_sessions(project_id: String) -> Result<Vec<Session>, String> {
                 let head = read_session_head(&path, 20);
 
                 let metadata = fs::metadata(&path).ok();
-                let last_modified = metadata.as_ref()
+                let last_modified = metadata
+                    .as_ref()
                     .and_then(|m| m.modified().ok())
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
-                let created_at = metadata.as_ref()
+                let created_at = metadata
+                    .as_ref()
                     .and_then(|m| m.created().ok())
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_secs())
@@ -851,13 +866,14 @@ async fn list_sessions(project_id: String) -> Result<Vec<Session>, String> {
 const PRICE_INPUT_PER_M: f64 = 15.0;
 const PRICE_OUTPUT_PER_M: f64 = 75.0;
 const PRICE_CACHE_WRITE_PER_M: f64 = 3.75; // cache creation
-const PRICE_CACHE_READ_PER_M: f64 = 0.30;  // cache read
+const PRICE_CACHE_READ_PER_M: f64 = 0.30; // cache read
 
 /// Calculate cost from token counts
 fn calculate_cost(usage: &SessionUsage) -> f64 {
     let input_cost = (usage.input_tokens as f64 / 1_000_000.0) * PRICE_INPUT_PER_M;
     let output_cost = (usage.output_tokens as f64 / 1_000_000.0) * PRICE_OUTPUT_PER_M;
-    let cache_write_cost = (usage.cache_creation_tokens as f64 / 1_000_000.0) * PRICE_CACHE_WRITE_PER_M;
+    let cache_write_cost =
+        (usage.cache_creation_tokens as f64 / 1_000_000.0) * PRICE_CACHE_WRITE_PER_M;
     let cache_read_cost = (usage.cache_read_tokens as f64 / 1_000_000.0) * PRICE_CACHE_READ_PER_M;
     input_cost + output_cost + cache_write_cost + cache_read_cost
 }
@@ -885,7 +901,8 @@ fn read_session_usage(path: &Path) -> SessionUsage {
             let lt = parsed.line_type.as_deref();
             let is_assistant = lt == Some("assistant")
                 || (lt == Some("message")
-                    && parsed.message.as_ref().and_then(|m| m.role.as_deref()) == Some("assistant"));
+                    && parsed.message.as_ref().and_then(|m| m.role.as_deref())
+                        == Some("assistant"));
             if is_assistant {
                 if let Some(msg) = &parsed.message {
                     if let Some(u) = &msg.usage {
@@ -1003,10 +1020,9 @@ fn extract_last_json_string_field(text: &str, key: &str) -> Option<String> {
         let mut from = 0usize;
         while from + pat.len() <= bytes.len() {
             // Naive substring search — chunks here are 64KB, plenty fast.
-            let Some(rel) = bytes[from..]
-                .windows(pat.len())
-                .position(|w| w == pat)
-            else { break };
+            let Some(rel) = bytes[from..].windows(pat.len()).position(|w| w == pat) else {
+                break;
+            };
             let value_start = from + rel + pat.len();
             // Walk the JSON string body, honoring backslash escapes, until
             // the closing quote.
@@ -1014,9 +1030,16 @@ fn extract_last_json_string_field(text: &str, key: &str) -> Option<String> {
             let mut closed_at: Option<usize> = None;
             while i < bytes.len() {
                 match bytes[i] {
-                    b'\\' if i + 1 < bytes.len() => { i += 2; }
-                    b'"' => { closed_at = Some(i); break; }
-                    _ => { i += 1; }
+                    b'\\' if i + 1 < bytes.len() => {
+                        i += 2;
+                    }
+                    b'"' => {
+                        closed_at = Some(i);
+                        break;
+                    }
+                    _ => {
+                        i += 1;
+                    }
                 }
             }
             let Some(end) = closed_at else { break };
@@ -1037,10 +1060,15 @@ fn extract_last_json_string_field(text: &str, key: &str) -> Option<String> {
                         Some('u') => {
                             // Skip 4 hex digits — we don't bother decoding
                             // \uXXXX since title/summary are plain text.
-                            for _ in 0..4 { let _ = chars.next(); }
+                            for _ in 0..4 {
+                                let _ = chars.next();
+                            }
                             out.push('\u{FFFD}');
                         }
-                        Some(other) => { out.push('\\'); out.push(other); }
+                        Some(other) => {
+                            out.push('\\');
+                            out.push(other);
+                        }
                         None => out.push('\\'),
                     }
                 } else {
@@ -1079,35 +1107,44 @@ fn read_head_tail(path: &Path) -> std::io::Result<(String, String)> {
     Ok((head, tail))
 }
 
-/// Count user-initiated rounds and total messages by streaming the whole file
-/// with cheap substring matching (no JSON parse). This is the only operation
-/// that touches every line — it's separated from metadata extraction so we
-/// can skip it on hot paths if the caller doesn't need exact counts.
-fn count_rounds_and_messages(path: &Path) -> (usize, usize) {
-    use std::io::{BufRead, BufReader};
-    let file = match fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return (0, 0),
-    };
-    let reader = BufReader::new(file);
-    let mut rounds = 0usize;
-    let mut messages = 0usize;
-    for line in reader.lines().map_while(Result::ok) {
-        if line.contains("\"type\":\"user\"") {
-            rounds += 1;
-            messages += 1;
-        } else if line.contains("\"type\":\"assistant\"") {
-            messages += 1;
-        } else if line.contains("\"type\":\"message\"") {
-            if line.contains("\"role\":\"user\"") {
+/// Approximate rounds/messages by counting markers inside the head+tail
+/// buffers we already loaded. Used purely for UI hints (sidebar badge, sort
+/// key, hideEmptySessions filter) — nobody needs exact counts on big files.
+/// Avoids the multi-second full-file scan over ~1GB of jsonl on reload.
+///
+/// Accuracy: exact for sessions that fit within 2*LITE_READ_BUF; for larger
+/// sessions we report only what's in head+tail (under-counts the middle).
+/// `rounds == 0` is still a reliable "empty session" signal because the
+/// first user prompt always lands in the head buffer.
+fn count_rounds_and_messages_from_buffers(head: &str, tail: &str) -> (usize, usize) {
+    let count_in = |buf: &str| -> (usize, usize) {
+        let mut rounds = 0usize;
+        let mut messages = 0usize;
+        for line in buf.lines() {
+            if line.contains("\"type\":\"user\"") {
                 rounds += 1;
                 messages += 1;
-            } else if line.contains("\"role\":\"assistant\"") {
+            } else if line.contains("\"type\":\"assistant\"") {
                 messages += 1;
+            } else if line.contains("\"type\":\"message\"") {
+                if line.contains("\"role\":\"user\"") {
+                    rounds += 1;
+                    messages += 1;
+                } else if line.contains("\"role\":\"assistant\"") {
+                    messages += 1;
+                }
             }
         }
+        (rounds, messages)
+    };
+    let (hr, hm) = count_in(head);
+    // For small files, read_head_tail returns the same buffer for both —
+    // detect by content equality to avoid double-counting.
+    if head == tail {
+        return (hr, hm);
     }
-    (rounds, messages)
+    let (tr, tm) = count_in(tail);
+    (hr + tr, hm + tm)
 }
 
 /// Convert slug like "soft-petting-wave" to "Soft Petting Wave"
@@ -1124,7 +1161,6 @@ fn slug_to_title(slug: &str) -> String {
         .join(" ")
 }
 
-
 /// Read session metadata using Claude Code's lite-read protocol:
 /// scan only the first and last ~64KB of the jsonl. Stable fields (cwd, slug,
 /// first-prompt) live in the head; volatile / re-appended fields (customTitle,
@@ -1139,28 +1175,34 @@ fn slug_to_title(slug: &str) -> String {
 /// `_max_lines` is retained for source-compat with older callers; ignored.
 fn read_session_head(path: &Path, _max_lines: usize) -> SessionHead {
     let empty = SessionHead {
-        title: None, summary: None, last_prompt: None,
-        cwd: None, rounds: 0, message_count: 0, title_source: None,
+        title: None,
+        summary: None,
+        last_prompt: None,
+        cwd: None,
+        rounds: 0,
+        message_count: 0,
+        title_source: None,
     };
     let (head, tail) = match read_head_tail(path) {
         Ok(ht) => ht,
         Err(_) => return empty,
     };
 
-    let cwd = extract_last_json_string_field(&head, "cwd")
-        .filter(|s| !s.is_empty());
-    let slug = extract_last_json_string_field(&head, "slug")
-        .filter(|s| !s.is_empty());
+    let cwd = extract_last_json_string_field(&head, "cwd").filter(|s| !s.is_empty());
+    let slug = extract_last_json_string_field(&head, "slug").filter(|s| !s.is_empty());
 
     // Title precedence (matches Claude Code's readLiteMetadata):
     //   customTitle (tail) > customTitle (head) > aiTitle (tail) > aiTitle (head)
     // Tracks which source supplied the title so the UI can badge it.
     let nonempty = |s: String| if s.trim().is_empty() { None } else { Some(s) };
-    let (title, title_source) = if let Some(s) = extract_last_json_string_field(&tail, "customTitle").and_then(nonempty)
-        .or_else(|| extract_last_json_string_field(&head, "customTitle").and_then(nonempty))
+    let (title, title_source) = if let Some(s) =
+        extract_last_json_string_field(&tail, "customTitle")
+            .and_then(nonempty)
+            .or_else(|| extract_last_json_string_field(&head, "customTitle").and_then(nonempty))
     {
         (Some(s), Some("custom".to_string()))
-    } else if let Some(s) = extract_last_json_string_field(&tail, "aiTitle").and_then(nonempty)
+    } else if let Some(s) = extract_last_json_string_field(&tail, "aiTitle")
+        .and_then(nonempty)
         .or_else(|| extract_last_json_string_field(&head, "aiTitle").and_then(nonempty))
     {
         (Some(s), Some("ai".to_string()))
@@ -1172,18 +1214,29 @@ fn read_session_head(path: &Path, _max_lines: usize) -> SessionHead {
 
     // /compact summary lives in the tail (latest leaf wins by virtue of
     // last-occurrence semantics in extract_last_json_string_field).
-    let summary = extract_last_json_string_field(&tail, "summary")
-        .filter(|s| !s.trim().is_empty());
+    let summary = extract_last_json_string_field(&tail, "summary").filter(|s| !s.trim().is_empty());
 
     // lastPrompt is re-appended by Claude Code on every resume, so the latest
     // copy is in the tail. Strip our internal command/caveat markup so the UI
     // can render it cleanly as a fallback label.
     let last_prompt = extract_last_json_string_field(&tail, "lastPrompt")
-        .map(|s| strip_local_command_tags(&restore_slash_command(&s)).trim().to_string())
+        .map(|s| {
+            strip_local_command_tags(&restore_slash_command(&s))
+                .trim()
+                .to_string()
+        })
         .filter(|s| !s.is_empty());
 
-    let (rounds, messages) = count_rounds_and_messages(path);
-    SessionHead { title, summary, last_prompt, cwd, rounds, message_count: messages, title_source }
+    let (rounds, messages) = count_rounds_and_messages_from_buffers(&head, &tail);
+    SessionHead {
+        title,
+        summary,
+        last_prompt,
+        cwd,
+        rounds,
+        message_count: messages,
+        title_source,
+    }
 }
 
 /// Strip Claude Code internal `<local-command-{caveat,stdout,stderr}>...</...>` blocks.
@@ -1211,10 +1264,12 @@ fn restore_slash_command(content: &str) -> String {
     }
 
     // Extract command name and args first
-    let cmd = NAME_RE.captures(content)
+    let cmd = NAME_RE
+        .captures(content)
         .and_then(|c| c.get(1))
         .map(|m| m.as_str().to_string());
-    let args = ARGS_RE.captures(content)
+    let args = ARGS_RE
+        .captures(content)
         .and_then(|c| c.get(1))
         .map(|m| m.as_str().trim().to_string())
         .filter(|s| !s.is_empty());
@@ -1238,10 +1293,55 @@ fn restore_slash_command(content: &str) -> String {
 }
 
 /// Build session index from history.jsonl (fast: only reads one file)
+/// Cached form of build_session_index_from_history. The 13MB history.jsonl
+/// takes ~5s to fully parse on cold cache; this snapshots the result keyed by
+/// the file's (size, mtime) so reloads with no new history reuse it instantly.
+#[derive(Serialize, Deserialize)]
+struct HistoryIndexCache {
+    version: u32,
+    history_size: u64,
+    history_mtime: u64,
+    /// Flat array because HashMap<(K1,K2),V> doesn't serialize cleanly to JSON.
+    entries: Vec<(String, String, u64, Option<String>)>,
+}
+
+const HISTORY_INDEX_CACHE_VERSION: u32 = 1;
+
+fn history_index_cache_path() -> PathBuf {
+    get_lovstudio_dir().join("history-index.json")
+}
+
 fn build_session_index_from_history() -> HashMap<(String, String), (u64, Option<String>)> {
     use std::io::{BufRead, BufReader};
 
     let history_path = get_claude_dir().join("history.jsonl");
+
+    // Try cache first: if history.jsonl size+mtime match, reuse parsed index.
+    let history_meta = fs::metadata(&history_path).ok();
+    let history_size = history_meta.as_ref().map(|m| m.len()).unwrap_or(0);
+    let history_mtime = history_meta
+        .as_ref()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let cache_path = history_index_cache_path();
+    if let Ok(bytes) = fs::read(&cache_path) {
+        if let Ok(cached) = serde_json::from_slice::<HistoryIndexCache>(&bytes) {
+            if cached.version == HISTORY_INDEX_CACHE_VERSION
+                && cached.history_size == history_size
+                && cached.history_mtime == history_mtime
+            {
+                return cached
+                    .entries
+                    .into_iter()
+                    .map(|(p, s, ts, disp)| ((p, s), (ts, disp)))
+                    .collect();
+            }
+        }
+    }
+
     let mut index: HashMap<(String, String), (u64, Option<String>)> = HashMap::new();
 
     let file = match fs::File::open(&history_path) {
@@ -1288,58 +1388,160 @@ fn build_session_index_from_history() -> HashMap<(String, String), (u64, Option<
         }
     }
 
+    // Persist for next reload. Best-effort: failure here just costs a re-parse.
+    let cache_payload = HistoryIndexCache {
+        version: HISTORY_INDEX_CACHE_VERSION,
+        history_size,
+        history_mtime,
+        entries: index
+            .iter()
+            .map(|((p, s), (ts, disp))| (p.clone(), s.clone(), *ts, disp.clone()))
+            .collect(),
+    };
+    if let Some(parent) = cache_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(bytes) = serde_json::to_vec(&cache_payload) {
+        let _ = fs::write(&cache_path, bytes);
+    }
+
     index
 }
 
-#[tauri::command]
-async fn list_all_sessions() -> Result<Vec<Session>, String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        let projects_dir = get_claude_dir().join("projects");
+// ============================================================================
+// Sessions cache (B): persist computed Session list keyed by (path,size,mtime)
+// so cold reload doesn't re-read 1000+ jsonl files. Entries whose stat hasn't
+// changed are reused verbatim; only new/modified files run read_session_head.
+// Cache lives at ~/.lovstudio/lovcode/sessions-cache.json.
+// ============================================================================
 
-        if !projects_dir.exists() {
-            return Ok(vec![]);
-        }
+#[derive(Debug, Serialize, Deserialize)]
+struct SessionCacheEntry {
+    path: String,
+    size: u64,
+    mtime: u64,
+    session: Session,
+}
 
-        // Build index from history.jsonl first (fast)
-        let history_index = build_session_index_from_history();
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct SessionsCache {
+    /// Bumped whenever Session shape / read_session_head logic changes so old
+    /// cache files are silently discarded.
+    version: u32,
+    entries: Vec<SessionCacheEntry>,
+}
 
-        let mut all_sessions = Vec::new();
-        let mut seen_sessions: std::collections::HashSet<(String, String)> =
-            std::collections::HashSet::new();
+const SESSIONS_CACHE_VERSION: u32 = 1;
 
-        // First pass: use history index for sessions with sessionId
-        for ((project_id, session_id), (timestamp, _display)) in &history_index {
+fn sessions_cache_path() -> PathBuf {
+    get_lovstudio_dir().join("sessions-cache.json")
+}
+
+fn load_sessions_cache() -> HashMap<String, SessionCacheEntry> {
+    let path = sessions_cache_path();
+    let Ok(bytes) = fs::read(&path) else {
+        return HashMap::new();
+    };
+    let Ok(cache) = serde_json::from_slice::<SessionsCache>(&bytes) else {
+        return HashMap::new();
+    };
+    if cache.version != SESSIONS_CACHE_VERSION {
+        return HashMap::new();
+    }
+    cache
+        .entries
+        .into_iter()
+        .map(|e| (e.path.clone(), e))
+        .collect()
+}
+
+fn save_sessions_cache(entries: Vec<SessionCacheEntry>) {
+    let path = sessions_cache_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let cache = SessionsCache {
+        version: SESSIONS_CACHE_VERSION,
+        entries,
+    };
+    if let Ok(bytes) = serde_json::to_vec(&cache) {
+        let _ = fs::write(&path, bytes);
+    }
+}
+
+/// Core sync logic: build the full Session list (cli + app sources, deduped,
+/// sorted desc by last_modified). Used by both the bulk command and the
+/// streamed command — they only differ in how they ship the result back.
+fn compute_all_sessions() -> Vec<Session> {
+    let projects_dir = get_claude_dir().join("projects");
+    if !projects_dir.exists() {
+        return Vec::new();
+    }
+    let history_index = build_session_index_from_history();
+    let cache = load_sessions_cache();
+    // Collected during pass1/pass2 (cache hits + fresh reads alike) so we
+    // can persist the up-to-date set after this run. Mutex<Vec> is fine —
+    // contention is low (one push per file).
+    let new_cache_entries: std::sync::Mutex<Vec<SessionCacheEntry>> =
+        std::sync::Mutex::new(Vec::new());
+
+    use rayon::prelude::*;
+
+    // First pass: use history index for sessions with sessionId.
+    // Parallelized: read_session_head is ~16ms each (head+tail IO + UTF-8
+    // decode + regex), serial loop over 1000+ files dominates wall time.
+    let pass1_inputs: Vec<(String, String, u64)> = history_index
+        .iter()
+        .map(|((p, s), (ts, _))| (p.clone(), s.clone(), *ts))
+        .collect();
+
+    let mut all_sessions: Vec<Session> = pass1_inputs
+        .par_iter()
+        .filter_map(|(project_id, session_id, timestamp)| {
             let session_path = projects_dir
                 .join(project_id)
                 .join(format!("{}.jsonl", session_id));
-
-            if !session_path.exists() {
-                continue;
-            }
-
-            seen_sessions.insert((project_id.clone(), session_id.clone()));
-
-            let head = read_session_head(&session_path, 20);
-            // Only use the genuine `type:"summary"` line emitted by Claude Code
-            // (written on /compact or session close). No fallback to user prompts —
-            // the frontend renders a placeholder when this is None.
-            let final_summary = head.summary;
-
-            let metadata = fs::metadata(&session_path).ok();
-            let last_modified = metadata.as_ref()
-                .and_then(|m| m.modified().ok())
+            let metadata = fs::metadata(&session_path).ok()?;
+            let size = metadata.len();
+            let mtime = metadata
+                .modified()
+                .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs())
-                .unwrap_or(*timestamp / 1000);
-            let created_at = metadata.as_ref()
-                .and_then(|m| m.created().ok())
+                .unwrap_or(0);
+
+            // Cache hit: file size & mtime unchanged → reuse stored Session.
+            let path_key = session_path.to_string_lossy().into_owned();
+            if let Some(entry) = cache.get(&path_key) {
+                if entry.size == size && entry.mtime == mtime {
+                    let s = entry.session.clone();
+                    new_cache_entries.lock().unwrap().push(SessionCacheEntry {
+                        path: path_key,
+                        size,
+                        mtime,
+                        session: s.clone(),
+                    });
+                    return Some(s);
+                }
+            }
+
+            let head = read_session_head(&session_path, 20);
+            let final_summary = head.summary;
+
+            let last_modified = if mtime > 0 { mtime } else { *timestamp / 1000 };
+            let created_at = metadata
+                .created()
+                .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs())
                 .unwrap_or(last_modified);
 
-            let display_path = head.cwd.clone().unwrap_or_else(|| decode_project_path(project_id));
+            let display_path = head
+                .cwd
+                .clone()
+                .unwrap_or_else(|| decode_project_path(project_id));
 
-            all_sessions.push(Session {
+            let session = Session {
                 id: session_id.clone(),
                 project_id: project_id.clone(),
                 project_path: Some(display_path),
@@ -1353,105 +1555,174 @@ async fn list_all_sessions() -> Result<Vec<Session>, String> {
                 last_modified,
                 usage: None,
                 source: "cli".to_string(),
+            };
+            new_cache_entries.lock().unwrap().push(SessionCacheEntry {
+                path: path_key,
+                size,
+                mtime,
+                session: session.clone(),
             });
-        }
+            Some(session)
+        })
+        .collect();
 
-        // Second pass: scan for sessions not in history (older sessions without sessionId)
-        for project_entry in fs::read_dir(&projects_dir).into_iter().flatten().flatten() {
-            let project_path = project_entry.path();
-            if !project_path.is_dir() {
+    // Build seen-set from successful pass1 entries for pass2/pass3 dedup.
+    let mut seen_sessions: std::collections::HashSet<(String, String)> = all_sessions
+        .iter()
+        .map(|s| (s.project_id.clone(), s.id.clone()))
+        .collect();
+
+    // Second pass: scan for sessions not in history (older sessions without sessionId).
+    // Collect candidate (project_id, display_path, session_path, session_id) tuples
+    // serially (cheap dir walk), then process them in parallel.
+    let mut pass2_candidates: Vec<(String, String, std::path::PathBuf, String)> = Vec::new();
+    for project_entry in fs::read_dir(&projects_dir).into_iter().flatten().flatten() {
+        let project_path = project_entry.path();
+        if !project_path.is_dir() {
+            continue;
+        }
+        let project_id = project_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let display_path = decode_project_path(&project_id);
+
+        for entry in fs::read_dir(&project_path).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if !name.ends_with(".jsonl") || name.starts_with("agent-") {
                 continue;
             }
+            let session_id = name.trim_end_matches(".jsonl").to_string();
+            if seen_sessions.contains(&(project_id.clone(), session_id.clone())) {
+                continue;
+            }
+            pass2_candidates.push((project_id.clone(), display_path.clone(), path, session_id));
+        }
+    }
 
-            let project_id = project_path
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .to_string();
-            let display_path = decode_project_path(&project_id);
+    let pass2_sessions: Vec<Session> = pass2_candidates
+        .par_iter()
+        .filter_map(|(project_id, display_path, path, session_id)| {
+            let metadata = fs::metadata(path).ok()?;
+            let size = metadata.len();
+            let mtime = metadata
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
 
-            for entry in fs::read_dir(&project_path).into_iter().flatten().flatten() {
-                let path = entry.path();
-                let name = path.file_name().unwrap().to_string_lossy().to_string();
-
-                if name.ends_with(".jsonl") && !name.starts_with("agent-") {
-                    let session_id = name.trim_end_matches(".jsonl").to_string();
-
-                    // Skip if already processed from history
-                    if seen_sessions.contains(&(project_id.clone(), session_id.clone())) {
-                        continue;
-                    }
-
-                    let head = read_session_head(&path, 20);
-                    let session_path = head.cwd.clone().unwrap_or_else(|| display_path.clone());
-
-                    let metadata = fs::metadata(&path).ok();
-                    let last_modified = metadata.as_ref()
-                        .and_then(|m| m.modified().ok())
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                    let created_at = metadata.as_ref()
-                        .and_then(|m| m.created().ok())
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs())
-                        .unwrap_or(last_modified);
-
-                    all_sessions.push(Session {
-                        id: session_id,
-                        project_id: project_id.clone(),
-                        project_path: Some(session_path),
-                        title: head.title,
-                        summary: head.summary,
-                        last_prompt: head.last_prompt,
-                        title_source: head.title_source,
-                        rounds: head.rounds,
-                        message_count: head.message_count,
-                        created_at,
-                        last_modified,
-                        usage: None,
-                        source: "cli".to_string(),
+            let path_key = path.to_string_lossy().into_owned();
+            if let Some(entry) = cache.get(&path_key) {
+                if entry.size == size && entry.mtime == mtime {
+                    let s = entry.session.clone();
+                    new_cache_entries.lock().unwrap().push(SessionCacheEntry {
+                        path: path_key,
+                        size,
+                        mtime,
+                        session: s.clone(),
                     });
+                    return Some(s);
                 }
             }
-        }
 
-        // Third pass: Claude desktop app Code tab sessions
-        // ~/Library/Application Support/Claude/claude-code-sessions/<deviceId>/<accountId>/local_*.json
-        // These have richer metadata (title, cwd, lastActivityAt) and link to the same CLI .jsonl files.
-        if let Some(home) = dirs::home_dir() {
-            let app_sessions_root = home
-                .join("Library")
-                .join("Application Support")
-                .join("Claude")
-                .join("claude-code-sessions");
-            if app_sessions_root.exists() {
-                // walk deviceId / accountId levels
-                for device_entry in fs::read_dir(&app_sessions_root).into_iter().flatten().flatten() {
-                    for account_entry in fs::read_dir(device_entry.path()).into_iter().flatten().flatten() {
-                        for file_entry in fs::read_dir(account_entry.path()).into_iter().flatten().flatten() {
-                            let file_path = file_entry.path();
-                            let fname = file_path.file_name().unwrap_or_default().to_string_lossy().to_string();
-                            if !fname.starts_with("local_") || !fname.ends_with(".json") {
-                                continue;
-                            }
-                            let Ok(content) = fs::read_to_string(&file_path) else { continue };
-                            let Ok(meta) = serde_json::from_str::<serde_json::Value>(&content) else { continue };
+            let head = read_session_head(path, 20);
+            let session_path = head.cwd.clone().unwrap_or_else(|| display_path.clone());
 
-                            let cli_session_id = match meta.get("cliSessionId").and_then(|v| v.as_str()) {
-                                Some(id) => id.to_string(),
-                                None => continue,
-                            };
-                            let cwd = match meta.get("cwd").and_then(|v| v.as_str()) {
-                                Some(p) => p.to_string(),
-                                None => continue,
-                            };
+            let last_modified = mtime;
+            let created_at = metadata
+                .created()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(last_modified);
 
-                            // Claude CLI encodes non-ASCII chars (e.g. 手工川 -> ----) in
-                            // a lossy way that cannot be reversed by string substitution.
-                            // Instead, scan project_dirs for the dir containing this jsonl.
-                            let jsonl_filename = format!("{}.jsonl", cli_session_id);
-                            let project_id = match seen_sessions.iter().find(|(_, sid)| sid == &cli_session_id) {
+            let session = Session {
+                id: session_id.clone(),
+                project_id: project_id.clone(),
+                project_path: Some(session_path),
+                title: head.title,
+                summary: head.summary,
+                last_prompt: head.last_prompt,
+                title_source: head.title_source,
+                rounds: head.rounds,
+                message_count: head.message_count,
+                created_at,
+                last_modified,
+                usage: None,
+                source: "cli".to_string(),
+            };
+            new_cache_entries.lock().unwrap().push(SessionCacheEntry {
+                path: path_key,
+                size,
+                mtime,
+                session: session.clone(),
+            });
+            Some(session)
+        })
+        .collect();
+    all_sessions.extend(pass2_sessions);
+
+    // Third pass: Claude desktop app Code tab sessions
+    // ~/Library/Application Support/Claude/claude-code-sessions/<deviceId>/<accountId>/local_*.json
+    // These have richer metadata (title, cwd, lastActivityAt) and link to the same CLI .jsonl files.
+    if let Some(home) = dirs::home_dir() {
+        let app_sessions_root = home
+            .join("Library")
+            .join("Application Support")
+            .join("Claude")
+            .join("claude-code-sessions");
+        if app_sessions_root.exists() {
+            // walk deviceId / accountId levels
+            for device_entry in fs::read_dir(&app_sessions_root)
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                for account_entry in fs::read_dir(device_entry.path())
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                {
+                    for file_entry in fs::read_dir(account_entry.path())
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                    {
+                        let file_path = file_entry.path();
+                        let fname = file_path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string();
+                        if !fname.starts_with("local_") || !fname.ends_with(".json") {
+                            continue;
+                        }
+                        let Ok(content) = fs::read_to_string(&file_path) else {
+                            continue;
+                        };
+                        let Ok(meta) = serde_json::from_str::<serde_json::Value>(&content) else {
+                            continue;
+                        };
+
+                        let cli_session_id = match meta.get("cliSessionId").and_then(|v| v.as_str())
+                        {
+                            Some(id) => id.to_string(),
+                            None => continue,
+                        };
+                        let cwd = match meta.get("cwd").and_then(|v| v.as_str()) {
+                            Some(p) => p.to_string(),
+                            None => continue,
+                        };
+
+                        // Claude CLI encodes non-ASCII chars (e.g. 手工川 -> ----) in
+                        // a lossy way that cannot be reversed by string substitution.
+                        // Instead, scan project_dirs for the dir containing this jsonl.
+                        let jsonl_filename = format!("{}.jsonl", cli_session_id);
+                        let project_id =
+                            match seen_sessions.iter().find(|(_, sid)| sid == &cli_session_id) {
                                 Some((pid, _)) => pid.clone(),
                                 None => {
                                     // Fall back to filesystem scan
@@ -1459,7 +1730,9 @@ async fn list_all_sessions() -> Result<Vec<Session>, String> {
                                     if let Ok(entries) = fs::read_dir(&projects_dir) {
                                         for e in entries.flatten() {
                                             if e.path().join(&jsonl_filename).exists() {
-                                                found = Some(e.file_name().to_string_lossy().to_string());
+                                                found = Some(
+                                                    e.file_name().to_string_lossy().to_string(),
+                                                );
                                                 break;
                                             }
                                         }
@@ -1469,29 +1742,38 @@ async fn list_all_sessions() -> Result<Vec<Session>, String> {
                                 }
                             };
 
-                            // Skip if CLI already loaded this session with better data
-                            if seen_sessions.contains(&(project_id.clone(), cli_session_id.clone())) {
-                                // Upgrade title if app has one and CLI didn't
-                                if let Some(s) = all_sessions.iter_mut().find(|s| s.id == cli_session_id && s.project_id == project_id) {
-                                    if s.title.is_none() {
-                                        s.title = meta.get("title").and_then(|v| v.as_str()).map(|t| t.to_string());
-                                    }
-                                    s.source = "app-code".to_string();
+                        // Skip if CLI already loaded this session with better data
+                        if seen_sessions.contains(&(project_id.clone(), cli_session_id.clone())) {
+                            // Upgrade title if app has one and CLI didn't
+                            if let Some(s) = all_sessions
+                                .iter_mut()
+                                .find(|s| s.id == cli_session_id && s.project_id == project_id)
+                            {
+                                if s.title.is_none() {
+                                    s.title = meta
+                                        .get("title")
+                                        .and_then(|v| v.as_str())
+                                        .map(|t| t.to_string());
                                 }
-                                continue;
+                                s.source = "app-code".to_string();
                             }
+                            continue;
+                        }
 
-                            // Find the CLI .jsonl to get rounds / message_count
-                            let jsonl_path = projects_dir.join(&project_id).join(&jsonl_filename);
-                            let (rounds, message_count, jsonl_modified, jsonl_created) = if jsonl_path.exists() {
+                        // Find the CLI .jsonl to get rounds / message_count
+                        let jsonl_path = projects_dir.join(&project_id).join(&jsonl_filename);
+                        let (rounds, message_count, jsonl_modified, jsonl_created) =
+                            if jsonl_path.exists() {
                                 let head = read_session_head(&jsonl_path, 20);
                                 let metadata = fs::metadata(&jsonl_path).ok();
-                                let modified = metadata.as_ref()
+                                let modified = metadata
+                                    .as_ref()
                                     .and_then(|m| m.modified().ok())
                                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                                     .map(|d| d.as_secs())
                                     .unwrap_or(0);
-                                let created = metadata.as_ref()
+                                let created = metadata
+                                    .as_ref()
                                     .and_then(|m| m.created().ok())
                                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                                     .map(|d| d.as_secs())
@@ -1501,79 +1783,163 @@ async fn list_all_sessions() -> Result<Vec<Session>, String> {
                                 (0, 0, 0, 0)
                             };
 
-                            let last_activity_ms = meta.get("lastActivityAt").and_then(|v| v.as_u64()).unwrap_or(0);
-                            let last_modified = if jsonl_modified > 0 { jsonl_modified } else { last_activity_ms / 1000 };
-                            let created_at = if jsonl_created > 0 { jsonl_created } else {
-                                meta.get("createdAt").and_then(|v| v.as_u64()).map(|ms| ms / 1000).unwrap_or(last_modified)
-                            };
-
-                            let title = meta.get("title").and_then(|v| v.as_str()).map(|t| t.to_string());
-                            let title_source = if title.is_some() { Some("custom".to_string()) } else { None };
-
-                            seen_sessions.insert((project_id.clone(), cli_session_id.clone()));
-                            all_sessions.push(Session {
-                                id: cli_session_id,
-                                project_id,
-                                project_path: Some(cwd),
-                                title,
-                                summary: None,
-                                last_prompt: None,
-                                title_source,
-                                rounds,
-                                message_count,
-                                created_at,
-                                last_modified,
-                                usage: None,
-                                source: "app-code".to_string(),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-
-        // Mark sessions living under the synthetic "-claude-ai" project as
-        // app-web (synced from claude.ai). This stays after the desktop-app
-        // Code pass so app-code wins if the same id ever appeared in both
-        // (shouldn't happen — different id space — but defensive).
-        for s in all_sessions.iter_mut() {
-            if s.project_id == "-claude-ai" && s.source == "cli" {
-                s.source = "app-web".to_string();
-            }
-        }
-
-        // De-duplicate by session id. The same cliSessionId can be registered
-        // from multiple passes if its project path encodes inconsistently
-        // (e.g. CLI uses a different lossy encoding than ours for non-ASCII
-        // cwds). When duplicates appear, keep the entry with the most
-        // complete data (highest rounds, prefer source=app for title).
-        let mut by_id: std::collections::HashMap<String, Session> = std::collections::HashMap::new();
-        for s in all_sessions.into_iter() {
-            match by_id.get(&s.id) {
-                Some(existing) => {
-                    let take_new = s.rounds > existing.rounds
-                        || (s.source.starts_with("app") && !existing.source.starts_with("app"));
-                    if take_new {
-                        let merged = Session {
-                            title: s.title.clone().or_else(|| existing.title.clone()),
-                            summary: s.summary.clone().or_else(|| existing.summary.clone()),
-                            ..s
+                        let last_activity_ms = meta
+                            .get("lastActivityAt")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let last_modified = if jsonl_modified > 0 {
+                            jsonl_modified
+                        } else {
+                            last_activity_ms / 1000
                         };
-                        by_id.insert(merged.id.clone(), merged);
+                        let created_at = if jsonl_created > 0 {
+                            jsonl_created
+                        } else {
+                            meta.get("createdAt")
+                                .and_then(|v| v.as_u64())
+                                .map(|ms| ms / 1000)
+                                .unwrap_or(last_modified)
+                        };
+
+                        let title = meta
+                            .get("title")
+                            .and_then(|v| v.as_str())
+                            .map(|t| t.to_string());
+                        let title_source = if title.is_some() {
+                            Some("custom".to_string())
+                        } else {
+                            None
+                        };
+
+                        seen_sessions.insert((project_id.clone(), cli_session_id.clone()));
+                        all_sessions.push(Session {
+                            id: cli_session_id,
+                            project_id,
+                            project_path: Some(cwd),
+                            title,
+                            summary: None,
+                            last_prompt: None,
+                            title_source,
+                            rounds,
+                            message_count,
+                            created_at,
+                            last_modified,
+                            usage: None,
+                            source: "app-code".to_string(),
+                        });
                     }
-                }
-                None => {
-                    by_id.insert(s.id.clone(), s);
                 }
             }
         }
-        let mut all_sessions: Vec<Session> = by_id.into_values().collect();
+    }
 
-        all_sessions.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
-        Ok(all_sessions)
+    // Mark sessions living under the synthetic "-claude-ai" project as
+    // app-web (synced from claude.ai). This stays after the desktop-app
+    // Code pass so app-code wins if the same id ever appeared in both
+    // (shouldn't happen — different id space — but defensive).
+    for s in all_sessions.iter_mut() {
+        if s.project_id == "-claude-ai" && s.source == "cli" {
+            s.source = "app-web".to_string();
+        }
+    }
+
+    // De-duplicate by session id. The same cliSessionId can be registered
+    // from multiple passes if its project path encodes inconsistently
+    // (e.g. CLI uses a different lossy encoding than ours for non-ASCII
+    // cwds). When duplicates appear, keep the entry with the most
+    // complete data (highest rounds, prefer source=app for title).
+    let mut by_id: std::collections::HashMap<String, Session> = std::collections::HashMap::new();
+    for s in all_sessions.into_iter() {
+        match by_id.get(&s.id) {
+            Some(existing) => {
+                let take_new = s.rounds > existing.rounds
+                    || (s.source.starts_with("app") && !existing.source.starts_with("app"));
+                if take_new {
+                    let merged = Session {
+                        title: s.title.clone().or_else(|| existing.title.clone()),
+                        summary: s.summary.clone().or_else(|| existing.summary.clone()),
+                        ..s
+                    };
+                    by_id.insert(merged.id.clone(), merged);
+                }
+            }
+            None => {
+                by_id.insert(s.id.clone(), s);
+            }
+        }
+    }
+    let mut all_sessions: Vec<Session> = by_id.into_values().collect();
+
+    all_sessions.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
+
+    let entries = new_cache_entries.into_inner().unwrap();
+    save_sessions_cache(entries);
+
+    all_sessions
+}
+
+/// Single-flight guard: when a webview reload races with the previous instance
+/// (or multiple components mount in parallel), every caller would otherwise
+/// trigger its own `compute_all_sessions` (1+ second of disk IO + 1MB JSON
+/// serialization × N). This serializes them — the first call computes, the
+/// rest await the same Mutex and reuse the cached result if it's fresh.
+static SESSIONS_INFLIGHT: std::sync::OnceLock<
+    tokio::sync::Mutex<Option<(std::time::Instant, Vec<Session>)>>,
+> = std::sync::OnceLock::new();
+
+const SESSIONS_CACHE_TTL_MS: u128 = 3000;
+
+async fn compute_all_sessions_dedup() -> Vec<Session> {
+    let lock = SESSIONS_INFLIGHT.get_or_init(|| tokio::sync::Mutex::new(None));
+    let mut guard = lock.lock().await;
+    if let Some((computed_at, ref cached)) = *guard {
+        if computed_at.elapsed().as_millis() < SESSIONS_CACHE_TTL_MS {
+            return cached.clone();
+        }
+    }
+    let fresh = tauri::async_runtime::spawn_blocking(compute_all_sessions)
+        .await
+        .unwrap_or_default();
+    *guard = Some((std::time::Instant::now(), fresh.clone()));
+    fresh
+}
+
+#[tauri::command]
+async fn list_all_sessions() -> Result<Vec<Session>, String> {
+    Ok(compute_all_sessions_dedup().await)
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+enum SessionStreamEvent {
+    /// One batch of sessions — front-end appends as they arrive.
+    Batch { sessions: Vec<Session> },
+    /// All batches sent. Front-end can flip loading=false for sure.
+    Done { total: usize },
+}
+
+/// Streamed variant of list_all_sessions. The Rust side still computes the
+/// full list (sorted), then ships it to the webview in 200-session batches
+/// over a Tauri Channel — each batch is a separate IPC message, so the
+/// webview can render the first slice (~200 most-recent sessions) within a
+/// few hundred ms instead of waiting for the whole 5-6s JSON.parse.
+#[tauri::command]
+async fn list_all_sessions_streamed(on_event: Channel<SessionStreamEvent>) -> Result<(), String> {
+    let mut all = compute_all_sessions_dedup().await;
+    let total = all.len();
+    tauri::async_runtime::spawn_blocking(move || {
+        const BATCH: usize = 200;
+        // Drain front-to-back so the most-recent sessions ship first
+        // (compute_all_sessions sorts desc by last_modified).
+        while !all.is_empty() {
+            let take = std::cmp::min(BATCH, all.len());
+            let batch: Vec<Session> = all.drain(..take).collect();
+            let _ = on_event.send(SessionStreamEvent::Batch { sessions: batch });
+        }
+        let _ = on_event.send(SessionStreamEvent::Done { total });
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
 }
 
 /// Read Claude desktop app's "starredIds" (its name for pinned sessions) and
@@ -1592,7 +1958,9 @@ async fn list_all_sessions() -> Result<Vec<Session>, String> {
 #[tauri::command]
 async fn get_app_starred_session_ids() -> Result<Vec<String>, String> {
     tauri::async_runtime::spawn_blocking(|| {
-        let Some(home) = dirs::home_dir() else { return Ok(vec![]); };
+        let Some(home) = dirs::home_dir() else {
+            return Ok(vec![]);
+        };
         let leveldb_dir = home
             .join("Library")
             .join("Application Support")
@@ -1624,20 +1992,31 @@ async fn get_app_starred_session_ids() -> Result<Vec<String>, String> {
                 let start_marker = b"{\"state\":";
                 let start = match find_subslice_rev(&bytes[..abs_idx], start_marker) {
                     Some(s) => s,
-                    None => { search_from = abs_idx + needle.len(); continue; },
+                    None => {
+                        search_from = abs_idx + needle.len();
+                        continue;
+                    }
                 };
                 // Walk forward to find the matching closing `}` by brace counting
                 let end = match scan_balanced_json(&bytes, start) {
                     Some(e) => e,
-                    None => { search_from = abs_idx + needle.len(); continue; },
+                    None => {
+                        search_from = abs_idx + needle.len();
+                        continue;
+                    }
                 };
                 if let Ok(text) = std::str::from_utf8(&bytes[start..end]) {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
                         let updated_at = v.get("updatedAt").and_then(|x| x.as_u64()).unwrap_or(0);
-                        let ids: Vec<String> = v.get("state")
+                        let ids: Vec<String> = v
+                            .get("state")
                             .and_then(|s| s.get("starredIds"))
                             .and_then(|a| a.as_array())
-                            .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|x| x.as_str().map(String::from))
+                                    .collect()
+                            })
                             .unwrap_or_default();
                         if !ids.is_empty() {
                             match &latest {
@@ -1664,18 +2043,39 @@ async fn get_app_starred_session_ids() -> Result<Vec<String>, String> {
             .join("Claude")
             .join("claude-code-sessions");
 
-        let mut id_to_cli: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut id_to_cli: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         if app_sessions_root.exists() {
-            for d in fs::read_dir(&app_sessions_root).into_iter().flatten().flatten() {
+            for d in fs::read_dir(&app_sessions_root)
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
                 for a in fs::read_dir(d.path()).into_iter().flatten().flatten() {
                     for f in fs::read_dir(a.path()).into_iter().flatten().flatten() {
                         let p = f.path();
-                        let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
-                        if !name.starts_with("local_") || !name.ends_with(".json") { continue; }
-                        let Ok(content) = fs::read_to_string(&p) else { continue };
-                        let Ok(meta) = serde_json::from_str::<serde_json::Value>(&content) else { continue };
-                        let session_id = meta.get("sessionId").and_then(|v| v.as_str()).map(String::from);
-                        let cli_id = meta.get("cliSessionId").and_then(|v| v.as_str()).map(String::from);
+                        let name = p
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string();
+                        if !name.starts_with("local_") || !name.ends_with(".json") {
+                            continue;
+                        }
+                        let Ok(content) = fs::read_to_string(&p) else {
+                            continue;
+                        };
+                        let Ok(meta) = serde_json::from_str::<serde_json::Value>(&content) else {
+                            continue;
+                        };
+                        let session_id = meta
+                            .get("sessionId")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        let cli_id = meta
+                            .get("cliSessionId")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
                         if let (Some(sid), Some(cli)) = (session_id, cli_id) {
                             id_to_cli.insert(sid, cli);
                         }
@@ -1684,7 +2084,8 @@ async fn get_app_starred_session_ids() -> Result<Vec<String>, String> {
             }
         }
 
-        let mut resolved: Vec<String> = app_ids.into_iter()
+        let mut resolved: Vec<String> = app_ids
+            .into_iter()
             .filter_map(|aid| id_to_cli.get(&aid).cloned())
             .collect();
 
@@ -1695,7 +2096,9 @@ async fn get_app_starred_session_ids() -> Result<Vec<String>, String> {
         let web_cache = get_lovstudio_dir().join("claude-web-starred.json");
         if let Ok(content) = fs::read_to_string(&web_cache) {
             if let Ok(arr) = serde_json::from_str::<Vec<String>>(&content) {
-                for uuid in arr { resolved.push(uuid); }
+                for uuid in arr {
+                    resolved.push(uuid);
+                }
             }
         }
 
@@ -1716,16 +2119,26 @@ fn find_subslice_rev(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// Scan a balanced JSON object starting at `start`. Returns one-past-end index.
 /// Naively counts braces while skipping over strings (which may contain `{}`).
 fn scan_balanced_json(bytes: &[u8], start: usize) -> Option<usize> {
-    if start >= bytes.len() || bytes[start] != b'{' { return None; }
+    if start >= bytes.len() || bytes[start] != b'{' {
+        return None;
+    }
     let mut depth = 0i32;
     let mut in_str = false;
     let mut escape = false;
     for i in start..bytes.len() {
         let b = bytes[i];
         if in_str {
-            if escape { escape = false; continue; }
-            if b == b'\\' { escape = true; continue; }
-            if b == b'"' { in_str = false; }
+            if escape {
+                escape = false;
+                continue;
+            }
+            if b == b'\\' {
+                escape = true;
+                continue;
+            }
+            if b == b'"' {
+                in_str = false;
+            }
             continue;
         }
         match b {
@@ -1733,7 +2146,9 @@ fn scan_balanced_json(bytes: &[u8], start: usize) -> Option<usize> {
             b'{' => depth += 1,
             b'}' => {
                 depth -= 1;
-                if depth == 0 { return Some(i + 1); }
+                if depth == 0 {
+                    return Some(i + 1);
+                }
             }
             _ => {}
         }
@@ -1831,12 +2246,16 @@ async fn list_all_chats(
                         }
                     }
 
-                    let is_msg_line = matches!(line_type, Some("user") | Some("assistant") | Some("message"));
+                    let is_msg_line = matches!(
+                        line_type,
+                        Some("user") | Some("assistant") | Some("message")
+                    );
                     if is_msg_line {
                         if let Some(msg) = &parsed.message {
                             let role = msg.role.clone().unwrap_or_default();
                             if role == "user" || role == "assistant" {
-                                let (text_content, _is_tool) = extract_content_with_meta(&msg.content);
+                                let (text_content, _is_tool) =
+                                    extract_content_with_meta(&msg.content);
                                 let is_meta = parsed.is_meta.unwrap_or(false);
 
                                 // Skip meta messages and empty content
@@ -1907,7 +2326,10 @@ async fn get_session_messages(
                 let line_type = parsed.line_type.as_deref();
                 // Accept legacy CLI format (type=user|assistant) and Claude desktop
                 // app format (type=message wrapping a {role:user|assistant} payload).
-                let is_msg_line = matches!(line_type, Some("user") | Some("assistant") | Some("message"));
+                let is_msg_line = matches!(
+                    line_type,
+                    Some("user") | Some("assistant") | Some("message")
+                );
                 if !is_msg_line {
                     continue;
                 }
@@ -2265,23 +2687,65 @@ fn summarize_tool_input(name: &str, input: &serde_json::Value) -> String {
         None => return String::new(),
     };
     match name {
-        "Read" | "Write" => obj.get("file_path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        "Read" | "Write" => obj
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         "Edit" => {
             let path = obj.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
             let old = obj.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
-            if old.is_empty() { path.to_string() } else {
-                format!("{} ({}...)", path, &old.chars().take(40).collect::<String>())
+            if old.is_empty() {
+                path.to_string()
+            } else {
+                format!(
+                    "{} ({}...)",
+                    path,
+                    &old.chars().take(40).collect::<String>()
+                )
             }
         }
-        "Bash" => obj.get("command").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        "Grep" => obj.get("pattern").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        "Glob" => obj.get("pattern").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        "Task" => obj.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        "WebFetch" => obj.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        "WebSearch" => obj.get("query").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        "Bash" => obj
+            .get("command")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        "Grep" => obj
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        "Glob" => obj
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        "Task" => obj
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        "WebFetch" => obj
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        "WebSearch" => obj
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         _ => {
             // Try common field names
-            for key in &["file_path", "path", "command", "query", "pattern", "url", "description"] {
+            for key in &[
+                "file_path",
+                "path",
+                "command",
+                "query",
+                "pattern",
+                "url",
+                "description",
+            ] {
                 if let Some(v) = obj.get(*key).and_then(|v| v.as_str()) {
                     return v.to_string();
                 }
@@ -2294,19 +2758,18 @@ fn summarize_tool_input(name: &str, input: &serde_json::Value) -> String {
 fn extract_tool_result_content(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Array(arr) => {
-            arr.iter()
-                .filter_map(|item| {
-                    let obj = item.as_object()?;
-                    if obj.get("type").and_then(|v| v.as_str()) == Some("text") {
-                        obj.get("text").and_then(|v| v.as_str()).map(String::from)
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .filter_map(|item| {
+                let obj = item.as_object()?;
+                if obj.get("type").and_then(|v| v.as_str()) == Some("text") {
+                    obj.get("text").and_then(|v| v.as_str()).map(String::from)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
         _ => String::new(),
     }
 }
@@ -2328,32 +2791,64 @@ fn extract_content_blocks(value: &Option<serde_json::Value>) -> Option<Vec<Conte
             match block_type {
                 "text" => {
                     let text = obj.get("text").and_then(|v| v.as_str())?.to_string();
-                    if text.is_empty() { None } else { Some(ContentBlock::Text { text }) }
+                    if text.is_empty() {
+                        None
+                    } else {
+                        Some(ContentBlock::Text { text })
+                    }
                 }
                 "tool_use" => {
-                    let id = obj.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let id = obj
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let name = obj
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let input = obj.get("input").cloned().unwrap_or(serde_json::Value::Null);
                     let summary = summarize_tool_input(&name, &input);
                     Some(ContentBlock::ToolUse { id, name, summary })
                 }
                 "tool_result" => {
-                    let tool_use_id = obj.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let content = obj.get("content")
+                    let tool_use_id = obj
+                        .get("tool_use_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let content = obj
+                        .get("content")
                         .map(|v| extract_tool_result_content(v))
                         .unwrap_or_default();
-                    Some(ContentBlock::ToolResult { tool_use_id, content })
+                    Some(ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                    })
                 }
                 "thinking" => {
-                    let thinking = obj.get("thinking").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    if thinking.is_empty() { None } else { Some(ContentBlock::Thinking { thinking }) }
+                    let thinking = obj
+                        .get("thinking")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if thinking.is_empty() {
+                        None
+                    } else {
+                        Some(ContentBlock::Thinking { thinking })
+                    }
                 }
                 _ => None,
             }
         })
         .collect();
 
-    if blocks.is_empty() { None } else { Some(blocks) }
+    if blocks.is_empty() {
+        None
+    } else {
+        Some(blocks)
+    }
 }
 
 fn extract_content_with_meta(value: &Option<serde_json::Value>) -> (String, bool) {
@@ -3267,7 +3762,7 @@ fn list_local_skills() -> Result<Vec<LocalSkill>, String> {
                     name: skill_name,
                     path: skill_md.to_string_lossy().to_string(),
                     description: frontmatter.get("description").cloned(),
-                    content,  // Return raw content with frontmatter for frontend display
+                    content, // Return raw content with frontmatter for frontend display
                     marketplace,
                 });
             }
@@ -3340,7 +3835,8 @@ fn list_codex_commands() -> Result<Vec<CodexCommand>, String> {
                 let content = fs::read_to_string(&path).unwrap_or_default();
                 let (frontmatter, _, _) = parse_frontmatter(&content);
 
-                let name = path.file_stem()
+                let name = path
+                    .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_default();
 
@@ -3390,6 +3886,24 @@ pub struct ReferenceSource {
     pub name: String,
     pub path: String,
     pub doc_count: usize,
+    /// User-added (under ~/.lovstudio/docs/reference) vs bundled.
+    /// Only user sources can be refreshed / removed.
+    #[serde(default)]
+    pub is_user: bool,
+    /// Origin metadata if this source was added from a GitHub repo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<ReferenceOrigin>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ReferenceOrigin {
+    /// e.g. "anthropics/claude-code"
+    pub repo: String,
+    /// Optional sub-path inside repo (e.g. "docs")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_path: Option<String>,
+    /// ISO-8601 of last successful fetch
+    pub fetched_at: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -3420,7 +3934,10 @@ fn scan_reference_dir(dir: &Path) -> Vec<ReferenceSource> {
                                     e.as_ref()
                                         .ok()
                                         .map(|e| {
-                                            e.path().extension().map(|ext| ext == "md").unwrap_or(false)
+                                            e.path()
+                                                .extension()
+                                                .map(|ext| ext == "md")
+                                                .unwrap_or(false)
                                         })
                                         .unwrap_or(false)
                                 })
@@ -3428,16 +3945,29 @@ fn scan_reference_dir(dir: &Path) -> Vec<ReferenceSource> {
                         })
                         .unwrap_or(0);
 
+                    let origin = read_reference_origin(&path);
                     sources.push(ReferenceSource {
                         name,
                         path: path.to_string_lossy().to_string(),
                         doc_count,
+                        is_user: true,
+                        origin,
                     });
                 }
             }
         }
     }
     sources
+}
+
+fn reference_meta_path(source_dir: &Path) -> PathBuf {
+    source_dir.join(".meta.json")
+}
+
+fn read_reference_origin(source_dir: &Path) -> Option<ReferenceOrigin> {
+    let meta_path = reference_meta_path(source_dir);
+    let content = fs::read_to_string(&meta_path).ok()?;
+    serde_json::from_str(&content).ok()
 }
 
 /// Get bundled reference docs directories from app resources
@@ -3502,7 +4032,9 @@ fn list_reference_sources(app_handle: tauri::AppHandle) -> Result<Vec<ReferenceS
                         .filter(|e| {
                             e.as_ref()
                                 .ok()
-                                .map(|e| e.path().extension().map(|ext| ext == "md").unwrap_or(false))
+                                .map(|e| {
+                                    e.path().extension().map(|ext| ext == "md").unwrap_or(false)
+                                })
                                 .unwrap_or(false)
                         })
                         .count()
@@ -3513,6 +4045,8 @@ fn list_reference_sources(app_handle: tauri::AppHandle) -> Result<Vec<ReferenceS
                 name,
                 path: path.to_string_lossy().to_string(),
                 doc_count,
+                is_user: false,
+                origin: None,
             });
         }
     }
@@ -3540,7 +4074,10 @@ fn find_reference_source_dir(app_handle: &tauri::AppHandle, source: &str) -> Opt
 }
 
 #[tauri::command]
-fn list_reference_docs(app_handle: tauri::AppHandle, source: String) -> Result<Vec<ReferenceDoc>, String> {
+fn list_reference_docs(
+    app_handle: tauri::AppHandle,
+    source: String,
+) -> Result<Vec<ReferenceDoc>, String> {
     let source_dir = match find_reference_source_dir(&app_handle, &source) {
         Some(dir) => dir,
         None => return Ok(vec![]),
@@ -3614,6 +4151,707 @@ fn list_reference_docs(app_handle: tauri::AppHandle, source: String) -> Result<V
     }
 
     Ok(docs)
+}
+
+// ============================================================================
+// GitHub-backed reference sources
+// ============================================================================
+
+/// Parse a GitHub repo specifier into "owner/name".
+/// Accepts:
+///   - "owner/name"
+///   - "https://github.com/owner/name(.git)?(/...)?"
+///   - "git@github.com:owner/name(.git)?"
+fn parse_github_repo(input: &str) -> Result<String, String> {
+    let s = input.trim().trim_end_matches('/');
+    if s.is_empty() {
+        return Err("Empty repo".into());
+    }
+
+    let owner_name = if let Some(rest) = s.strip_prefix("https://github.com/") {
+        rest.to_string()
+    } else if let Some(rest) = s.strip_prefix("http://github.com/") {
+        rest.to_string()
+    } else if let Some(rest) = s.strip_prefix("git@github.com:") {
+        rest.to_string()
+    } else {
+        s.to_string()
+    };
+
+    let owner_name = owner_name.trim_end_matches(".git");
+    let parts: Vec<&str> = owner_name.split('/').collect();
+    if parts.len() < 2 || parts[0].is_empty() || parts[1].is_empty() {
+        return Err(format!("Invalid GitHub repo: {}", input));
+    }
+    Ok(format!("{}/{}", parts[0], parts[1]))
+}
+
+/// Default display name from repo (owner-name) — file-system safe.
+fn default_source_name(repo: &str) -> String {
+    repo.replace('/', "-")
+}
+
+fn sanitize_source_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// Download a GitHub zipball, extract all .md files matching `sub_path` filter,
+/// and write them flattened into `dest_dir` (overwriting any prior contents).
+/// On filename collisions, prefix with the relative path (slashes -> "__").
+async fn fetch_github_md_to_dir(
+    repo: &str,
+    sub_path: Option<&str>,
+    dest_dir: &Path,
+) -> Result<usize, String> {
+    let url = format!("https://api.github.com/repos/{}/zipball", repo);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client
+        .get(&url)
+        .header("User-Agent", "lovcode")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("GitHub request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!(
+            "GitHub returned {}: {}",
+            resp.status(),
+            resp.text().await.unwrap_or_default()
+        ));
+    }
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read zipball: {}", e))?;
+
+    let dest = dest_dir.to_path_buf();
+    let sub = sub_path.map(|s| s.trim_matches('/').to_string());
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<usize, String> {
+        if dest.exists() {
+            fs::remove_dir_all(&dest).map_err(|e| format!("Failed to clear dest: {}", e))?;
+        }
+        fs::create_dir_all(&dest).map_err(|e| format!("Failed to create dest: {}", e))?;
+
+        let cursor = std::io::Cursor::new(bytes);
+        let mut archive =
+            zip::ZipArchive::new(cursor).map_err(|e| format!("Failed to read zipball: {}", e))?;
+
+        let mut count = 0usize;
+        let mut used_names: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
+
+        for i in 0..archive.len() {
+            let mut entry = archive
+                .by_index(i)
+                .map_err(|e| format!("zip entry {}: {}", i, e))?;
+            if entry.is_dir() {
+                continue;
+            }
+            let entry_name = entry.name().to_string();
+            // GitHub zipballs are wrapped in a single top-level dir like "owner-repo-<sha>/...".
+            // Strip the first path segment.
+            let inner = match entry_name.split_once('/') {
+                Some((_, rest)) => rest,
+                None => continue,
+            };
+
+            // Apply sub_path filter
+            let rel = if let Some(ref sp) = sub {
+                if sp.is_empty() {
+                    inner
+                } else if inner == sp || inner.starts_with(&format!("{}/", sp)) {
+                    inner.strip_prefix(sp).unwrap().trim_start_matches('/')
+                } else {
+                    continue;
+                }
+            } else {
+                inner
+            };
+
+            if !rel.to_lowercase().ends_with(".md") {
+                continue;
+            }
+
+            // Build flat filename; on collision, prefix with path
+            let bare = Path::new(rel)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if bare.is_empty() {
+                continue;
+            }
+            let preferred = if rel.contains('/') {
+                // Prefer directory-prefixed name to preserve grouping hints
+                rel.replace('/', "__")
+            } else {
+                bare
+            };
+            let final_name = match used_names.get(&preferred).copied() {
+                None => {
+                    used_names.insert(preferred.clone(), 1);
+                    preferred
+                }
+                Some(n) => {
+                    used_names.insert(preferred.clone(), n + 1);
+                    let stem = preferred.trim_end_matches(".md");
+                    format!("{}-{}.md", stem, n)
+                }
+            };
+
+            let out_path = dest.join(&final_name);
+            let mut out_file =
+                fs::File::create(&out_path).map_err(|e| format!("create {}: {}", final_name, e))?;
+            std::io::copy(&mut entry, &mut out_file)
+                .map_err(|e| format!("write {}: {}", final_name, e))?;
+            count += 1;
+        }
+
+        if count == 0 {
+            return Err("No markdown files found (check sub-path)".into());
+        }
+        Ok(count)
+    })
+    .await
+    .map_err(|e| format!("Task panicked: {}", e))?
+}
+
+#[tauri::command]
+async fn add_reference_from_github(
+    repo: String,
+    sub_path: Option<String>,
+    display_name: Option<String>,
+) -> Result<ReferenceSource, String> {
+    let canonical_repo = parse_github_repo(&repo)?;
+    let raw_name = display_name
+        .as_deref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| default_source_name(&canonical_repo));
+    let name = sanitize_source_name(&raw_name);
+    if name.is_empty() {
+        return Err("Invalid display name".into());
+    }
+
+    let dest_dir = get_reference_dir().join(&name);
+    let sub = sub_path
+        .as_deref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let count = fetch_github_md_to_dir(&canonical_repo, sub.as_deref(), &dest_dir).await?;
+
+    let origin = ReferenceOrigin {
+        repo: canonical_repo,
+        sub_path: sub,
+        fetched_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let meta_json =
+        serde_json::to_string_pretty(&origin).map_err(|e| format!("serialize meta: {}", e))?;
+    fs::write(reference_meta_path(&dest_dir), meta_json)
+        .map_err(|e| format!("write meta: {}", e))?;
+
+    Ok(ReferenceSource {
+        name,
+        path: dest_dir.to_string_lossy().to_string(),
+        doc_count: count,
+        is_user: true,
+        origin: Some(origin),
+    })
+}
+
+#[tauri::command]
+async fn refresh_reference_source(name: String) -> Result<ReferenceSource, String> {
+    let safe = sanitize_source_name(&name);
+    if safe.is_empty() {
+        return Err("Invalid name".into());
+    }
+    let dest_dir = get_reference_dir().join(&safe);
+    let origin = read_reference_origin(&dest_dir)
+        .ok_or_else(|| "Source has no origin metadata; cannot refresh".to_string())?;
+
+    let count = fetch_github_md_to_dir(&origin.repo, origin.sub_path.as_deref(), &dest_dir).await?;
+
+    let new_origin = ReferenceOrigin {
+        fetched_at: chrono::Utc::now().to_rfc3339(),
+        ..origin
+    };
+    let meta_json =
+        serde_json::to_string_pretty(&new_origin).map_err(|e| format!("serialize meta: {}", e))?;
+    fs::write(reference_meta_path(&dest_dir), meta_json)
+        .map_err(|e| format!("write meta: {}", e))?;
+
+    Ok(ReferenceSource {
+        name: safe,
+        path: dest_dir.to_string_lossy().to_string(),
+        doc_count: count,
+        is_user: true,
+        origin: Some(new_origin),
+    })
+}
+
+#[tauri::command]
+fn remove_reference_source(name: String) -> Result<(), String> {
+    let safe = sanitize_source_name(&name);
+    if safe.is_empty() {
+        return Err("Invalid name".into());
+    }
+    let dir = get_reference_dir().join(&safe);
+    if !dir.exists() {
+        return Ok(());
+    }
+    fs::remove_dir_all(&dir).map_err(|e| format!("Failed to remove: {}", e))
+}
+
+// ============================================================================
+// Doc sources registry (sources.json) — flat list of all doc roots:
+// symlink (legacy ~/.lovstudio/docs/reference/*), github (same dir + meta),
+// vault (arbitrary local folder, e.g. Obsidian).
+// ============================================================================
+
+fn sources_registry_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".lovstudio/docs/sources.json")
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "lowercase")]
+pub enum DocSourceKind {
+    Symlink,
+    Github,
+    Vault,
+    Bundled,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DocSource {
+    /// Stable identifier (slug). Used in URLs and as React key.
+    pub id: String,
+    /// User-visible label (renamable).
+    pub name: String,
+    pub kind: DocSourceKind,
+    /// Absolute path to the source root directory.
+    pub path: String,
+    #[serde(default)]
+    pub hidden: bool,
+    #[serde(default)]
+    pub order: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<ReferenceOrigin>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct DocSourcesRegistry {
+    #[serde(default)]
+    sources: Vec<DocSource>,
+    #[serde(default)]
+    migrated: bool,
+}
+
+fn read_sources_registry() -> DocSourcesRegistry {
+    let path = sources_registry_path();
+    if !path.exists() {
+        return DocSourcesRegistry::default();
+    }
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn write_sources_registry(reg: &DocSourcesRegistry) -> Result<(), String> {
+    let path = sources_registry_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create parent: {}", e))?;
+    }
+    let json = serde_json::to_string_pretty(reg).map_err(|e| e.to_string())?;
+    fs::write(&path, json).map_err(|e| format!("write registry: {}", e))
+}
+
+fn slugify_doc_source_id(name: &str) -> String {
+    let mut s: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else if c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    while s.contains("--") {
+        s = s.replace("--", "-");
+    }
+    s.trim_matches('-').to_string()
+}
+
+fn unique_doc_source_id(base: &str, existing: &[DocSource]) -> String {
+    let base = if base.is_empty() {
+        "source".to_string()
+    } else {
+        base.to_string()
+    };
+    if !existing.iter().any(|s| s.id == base) {
+        return base;
+    }
+    for i in 2..1000 {
+        let candidate = format!("{}-{}", base, i);
+        if !existing.iter().any(|s| s.id == candidate) {
+            return candidate;
+        }
+    }
+    format!("{}-{}", base, chrono::Utc::now().timestamp())
+}
+
+/// One-shot migration: import existing symlink dirs + bundled docs into the registry.
+fn migrate_sources_if_needed(app_handle: &tauri::AppHandle) -> DocSourcesRegistry {
+    let mut reg = read_sources_registry();
+    if reg.migrated {
+        return reg;
+    }
+
+    // Import user reference dirs (symlinks and github-cloned)
+    let ref_dir = get_reference_dir();
+    let mut next_order: i32 = 0;
+    for src in scan_reference_dir(&ref_dir) {
+        let kind = if src.origin.is_some() {
+            DocSourceKind::Github
+        } else {
+            DocSourceKind::Symlink
+        };
+        let id = unique_doc_source_id(&slugify_doc_source_id(&src.name), &reg.sources);
+        reg.sources.push(DocSource {
+            id,
+            name: src.name,
+            kind,
+            path: src.path,
+            hidden: false,
+            order: next_order,
+            origin: src.origin,
+        });
+        next_order += 1;
+    }
+
+    // Import bundled docs
+    for (name, path) in get_bundled_reference_dirs(app_handle) {
+        if reg.sources.iter().any(|s| s.path == path.to_string_lossy()) {
+            continue;
+        }
+        let id = unique_doc_source_id(&slugify_doc_source_id(&name), &reg.sources);
+        reg.sources.push(DocSource {
+            id,
+            name,
+            kind: DocSourceKind::Bundled,
+            path: path.to_string_lossy().to_string(),
+            hidden: false,
+            order: next_order,
+            origin: None,
+        });
+        next_order += 1;
+    }
+
+    reg.migrated = true;
+    let _ = write_sources_registry(&reg);
+    reg
+}
+
+/// Recursive doc tree node.
+#[derive(Debug, Serialize, Clone)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum DocNode {
+    Dir {
+        name: String,
+        path: String,
+        children: Vec<DocNode>,
+    },
+    File {
+        name: String,
+        path: String,
+    },
+}
+
+fn read_dir_recursive(dir: &Path, max_depth: usize) -> Vec<DocNode> {
+    if max_depth == 0 {
+        return vec![];
+    }
+    let mut nodes: Vec<DocNode> = Vec::new();
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return nodes,
+    };
+
+    let mut dirs: Vec<(String, PathBuf)> = Vec::new();
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue; // skip dotfiles (.obsidian/, .meta.json, etc.)
+        }
+        let path = entry.path();
+        let md = match fs::metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if md.is_dir() {
+            dirs.push((name, path));
+        } else if md.is_file() {
+            let lower = name.to_lowercase();
+            if lower.ends_with(".md") || lower.ends_with(".markdown") {
+                files.push((name, path));
+            }
+        }
+    }
+
+    dirs.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    files.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+
+    for (name, path) in dirs {
+        let children = read_dir_recursive(&path, max_depth - 1);
+        if children.is_empty() {
+            continue; // hide empty dirs
+        }
+        nodes.push(DocNode::Dir {
+            name,
+            path: path.to_string_lossy().to_string(),
+            children,
+        });
+    }
+    for (name, path) in files {
+        let stem = Path::new(&name)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or(name.clone());
+        nodes.push(DocNode::File {
+            name: stem,
+            path: path.to_string_lossy().to_string(),
+        });
+    }
+    nodes
+}
+
+#[tauri::command]
+fn list_doc_sources(app_handle: tauri::AppHandle) -> Result<Vec<DocSource>, String> {
+    let mut reg = migrate_sources_if_needed(&app_handle);
+    reg.sources
+        .sort_by(|a, b| a.order.cmp(&b.order).then_with(|| a.name.cmp(&b.name)));
+    Ok(reg.sources)
+}
+
+#[tauri::command]
+fn list_doc_tree(app_handle: tauri::AppHandle, source_id: String) -> Result<Vec<DocNode>, String> {
+    let reg = migrate_sources_if_needed(&app_handle);
+    let src = reg
+        .sources
+        .iter()
+        .find(|s| s.id == source_id)
+        .ok_or_else(|| format!("Unknown source: {}", source_id))?;
+    let root = PathBuf::from(&src.path);
+    if !root.exists() {
+        return Err(format!("Source path does not exist: {}", src.path));
+    }
+    Ok(read_dir_recursive(&root, 12))
+}
+
+#[tauri::command]
+fn add_vault_source(path: String, name: Option<String>) -> Result<DocSource, String> {
+    let p = PathBuf::from(&path);
+    if !p.exists() || !p.is_dir() {
+        return Err(format!("Not a directory: {}", path));
+    }
+    let mut reg = read_sources_registry();
+    if reg.sources.iter().any(|s| s.path == path) {
+        return Err("This folder is already added".into());
+    }
+    let display = name
+        .as_deref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .unwrap_or_else(|| "vault".into());
+    let id = unique_doc_source_id(&slugify_doc_source_id(&display), &reg.sources);
+    let next_order = reg.sources.iter().map(|s| s.order).max().unwrap_or(-1) + 1;
+    let src = DocSource {
+        id,
+        name: display,
+        kind: DocSourceKind::Vault,
+        path: p.to_string_lossy().to_string(),
+        hidden: false,
+        order: next_order,
+        origin: None,
+    };
+    reg.sources.push(src.clone());
+    write_sources_registry(&reg)?;
+    Ok(src)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DocSourceUpdate {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub hidden: Option<bool>,
+    #[serde(default)]
+    pub order: Option<i32>,
+}
+
+#[tauri::command]
+fn update_doc_source(update: DocSourceUpdate) -> Result<DocSource, String> {
+    let mut reg = read_sources_registry();
+    let src = reg
+        .sources
+        .iter_mut()
+        .find(|s| s.id == update.id)
+        .ok_or_else(|| format!("Unknown source: {}", update.id))?;
+    if let Some(n) = update.name {
+        let trimmed = n.trim();
+        if !trimmed.is_empty() {
+            src.name = trimmed.to_string();
+        }
+    }
+    if let Some(h) = update.hidden {
+        src.hidden = h;
+    }
+    if let Some(o) = update.order {
+        src.order = o;
+    }
+    let result = src.clone();
+    write_sources_registry(&reg)?;
+    Ok(result)
+}
+
+#[tauri::command]
+fn remove_doc_source(id: String, delete_files: Option<bool>) -> Result<(), String> {
+    let mut reg = read_sources_registry();
+    let pos = reg
+        .sources
+        .iter()
+        .position(|s| s.id == id)
+        .ok_or_else(|| format!("Unknown source: {}", id))?;
+    let removed = reg.sources.remove(pos);
+    write_sources_registry(&reg)?;
+
+    // Only delete the on-disk folder for github/symlink sources we own;
+    // never touch vaults (they're external) or bundled (they're app resources).
+    if delete_files.unwrap_or(false) {
+        match removed.kind {
+            DocSourceKind::Symlink | DocSourceKind::Github => {
+                let p = PathBuf::from(&removed.path);
+                if p.exists() && p.starts_with(get_reference_dir()) {
+                    let _ = fs::remove_dir_all(&p);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn reorder_doc_sources(ids: Vec<String>) -> Result<(), String> {
+    let mut reg = read_sources_registry();
+    for (i, id) in ids.iter().enumerate() {
+        if let Some(s) = reg.sources.iter_mut().find(|s| s.id == *id) {
+            s.order = i as i32;
+        }
+    }
+    write_sources_registry(&reg)
+}
+
+#[tauri::command]
+async fn add_github_doc_source(
+    repo: String,
+    sub_path: Option<String>,
+    display_name: Option<String>,
+) -> Result<DocSource, String> {
+    let canonical_repo = parse_github_repo(&repo)?;
+    let raw_name = display_name
+        .as_deref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| default_source_name(&canonical_repo));
+    let safe = sanitize_source_name(&raw_name);
+    if safe.is_empty() {
+        return Err("Invalid display name".into());
+    }
+    let dest_dir = get_reference_dir().join(&safe);
+    let sub = sub_path
+        .as_deref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    fetch_github_md_to_dir(&canonical_repo, sub.as_deref(), &dest_dir).await?;
+
+    let origin = ReferenceOrigin {
+        repo: canonical_repo,
+        sub_path: sub,
+        fetched_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let meta_json =
+        serde_json::to_string_pretty(&origin).map_err(|e| format!("serialize meta: {}", e))?;
+    fs::write(reference_meta_path(&dest_dir), meta_json)
+        .map_err(|e| format!("write meta: {}", e))?;
+
+    let mut reg = read_sources_registry();
+    let id = unique_doc_source_id(&slugify_doc_source_id(&raw_name), &reg.sources);
+    let next_order = reg.sources.iter().map(|s| s.order).max().unwrap_or(-1) + 1;
+    let src = DocSource {
+        id,
+        name: raw_name,
+        kind: DocSourceKind::Github,
+        path: dest_dir.to_string_lossy().to_string(),
+        hidden: false,
+        order: next_order,
+        origin: Some(origin),
+    };
+    reg.sources.push(src.clone());
+    write_sources_registry(&reg)?;
+    Ok(src)
+}
+
+#[tauri::command]
+async fn refresh_doc_source(id: String) -> Result<DocSource, String> {
+    let mut reg = read_sources_registry();
+    let src = reg
+        .sources
+        .iter_mut()
+        .find(|s| s.id == id)
+        .ok_or_else(|| format!("Unknown source: {}", id))?;
+    let origin = src
+        .origin
+        .clone()
+        .ok_or_else(|| "Source has no origin metadata; cannot refresh".to_string())?;
+    let dest_dir = PathBuf::from(&src.path);
+    fetch_github_md_to_dir(&origin.repo, origin.sub_path.as_deref(), &dest_dir).await?;
+    let new_origin = ReferenceOrigin {
+        fetched_at: chrono::Utc::now().to_rfc3339(),
+        ..origin
+    };
+    let meta_json =
+        serde_json::to_string_pretty(&new_origin).map_err(|e| format!("serialize meta: {}", e))?;
+    fs::write(reference_meta_path(&dest_dir), meta_json)
+        .map_err(|e| format!("write meta: {}", e))?;
+    src.origin = Some(new_origin);
+    let result = src.clone();
+    write_sources_registry(&reg)?;
+    Ok(result)
 }
 
 #[tauri::command]
@@ -4162,7 +5400,8 @@ fn load_single_plugin(
                             .unwrap_or((None, None));
 
                         components.push(TemplateComponent {
-                            name: parsed_name.unwrap_or_else(|| format!("{}:{}", plugin_name, name)),
+                            name: parsed_name
+                                .unwrap_or_else(|| format!("{}:{}", plugin_name, name)),
                             path: skill_md.to_string_lossy().to_string(),
                             category: plugin_name.clone(),
                             component_type: "skill".to_string(),
@@ -4290,18 +5529,14 @@ fn load_personal_statuslines() -> Vec<TemplateComponent> {
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
             if path.extension().map_or(false, |e| e == "sh") {
-                let name = path
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy();
+                let name = path.file_stem().unwrap_or_default().to_string_lossy();
 
                 // Skip backup files (starting with _)
                 if name.starts_with('_') {
                     continue;
                 }
 
-                let name = name
-                    .to_string();
+                let name = name.to_string();
                 let content = fs::read_to_string(&path).ok();
 
                 // Parse description from script header comment
@@ -4335,7 +5570,8 @@ fn load_personal_statuslines() -> Vec<TemplateComponent> {
 #[tauri::command]
 fn get_templates_catalog(app_handle: tauri::AppHandle) -> Result<TemplatesCatalog, String> {
     let mut all_components: Vec<TemplateComponent> = Vec::new();
-    let mut source_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut source_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
 
     // Load from each source
     for source in PLUGIN_SOURCES {
@@ -4394,12 +5630,15 @@ fn get_templates_catalog(app_handle: tauri::AppHandle) -> Result<TemplatesCatalo
 
     // Add personal source if there are installed statuslines
     if personal_count > 0 {
-        sources.insert(0, SourceInfo {
-            id: "personal".to_string(),
-            name: "Installed".to_string(),
-            icon: "📦".to_string(),
-            count: personal_count,
-        });
+        sources.insert(
+            0,
+            SourceInfo {
+                id: "personal".to_string(),
+                name: "Installed".to_string(),
+                icon: "📦".to_string(),
+                count: personal_count,
+            },
+        );
     }
 
     Ok(TemplatesCatalog {
@@ -4445,7 +5684,8 @@ fn install_skill_template(
 
     // Create directory structure: ~/.claude/skills/{name}/
     let skill_dir = get_claude_dir().join("skills").join(&name);
-    fs::create_dir_all(&skill_dir).map_err(|e| format!("Failed to create skill directory: {}", e))?;
+    fs::create_dir_all(&skill_dir)
+        .map_err(|e| format!("Failed to create skill directory: {}", e))?;
 
     // Write SKILL.md file
     let skill_file = skill_dir.join("SKILL.md");
@@ -4788,7 +6028,9 @@ fn install_statusline_template(name: String, content: String) -> Result<String, 
 /// If ~/.claude/statusline.sh exists and is not already installed, backup to ~/.lovstudio/lovcode/statusline/_previous.sh
 #[tauri::command]
 fn apply_statusline(name: String) -> Result<String, String> {
-    let source_path = get_lovstudio_dir().join("statusline").join(format!("{}.sh", name));
+    let source_path = get_lovstudio_dir()
+        .join("statusline")
+        .join(format!("{}.sh", name));
     if !source_path.exists() {
         return Err(format!("Statusline template not found: {}", name));
     }
@@ -4857,7 +6099,10 @@ fn restore_previous_statusline() -> Result<String, String> {
 /// Check if previous statusline backup exists
 #[tauri::command]
 fn has_previous_statusline() -> bool {
-    get_lovstudio_dir().join("statusline").join("_previous.sh").exists()
+    get_lovstudio_dir()
+        .join("statusline")
+        .join("_previous.sh")
+        .exists()
 }
 
 /// Context passed to Lovcode statusbar script
@@ -4875,7 +6120,10 @@ pub struct StatusBarContext {
 
 /// Execute Lovcode's GUI statusbar script and return output
 #[tauri::command]
-fn execute_statusbar_script(script_path: String, context: StatusBarContext) -> Result<String, String> {
+fn execute_statusbar_script(
+    script_path: String,
+    context: StatusBarContext,
+) -> Result<String, String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
@@ -4930,7 +6178,7 @@ fn execute_statusbar_script(script_path: String, context: StatusBarContext) -> R
     Ok(first_line)
 }
 
-/// Get Lovcode statusbar settings from workspace.json
+/// Get Lovcode statusbar settings from statusbar-settings.json
 #[tauri::command]
 fn get_statusbar_settings() -> Result<Option<serde_json::Value>, String> {
     let settings_path = get_lovstudio_dir().join("statusbar-settings.json");
@@ -4976,7 +6224,9 @@ fn write_lovcode_statusbar_script(name: String, content: String) -> Result<Strin
 /// Remove installed statusline template
 #[tauri::command]
 fn remove_statusline_template(name: String) -> Result<(), String> {
-    let script_path = get_lovstudio_dir().join("statusline").join(format!("{}.sh", name));
+    let script_path = get_lovstudio_dir()
+        .join("statusline")
+        .join(format!("{}.sh", name));
     if script_path.exists() {
         fs::remove_file(&script_path).map_err(|e| e.to_string())?;
     }
@@ -5169,7 +6419,11 @@ async fn get_activity_stats() -> Result<ActivityStats, String> {
         let mut detailed: HashMap<String, usize> = HashMap::new();
 
         if !history_path.exists() {
-            return Ok(ActivityStats { daily, hourly, detailed });
+            return Ok(ActivityStats {
+                daily,
+                hourly,
+                detailed,
+            });
         }
 
         if let Ok(content) = fs::read_to_string(&history_path) {
@@ -5195,7 +6449,11 @@ async fn get_activity_stats() -> Result<ActivityStats, String> {
             }
         }
 
-        Ok(ActivityStats { daily, hourly, detailed })
+        Ok(ActivityStats {
+            daily,
+            hourly,
+            detailed,
+        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -5245,7 +6503,7 @@ async fn get_annual_report_2025() -> Result<AnnualReport2025, String> {
 
         // 2025 year bounds (UTC)
         let start_2025: u64 = 1735689600000; // 2025-01-01 00:00:00 UTC in ms
-        let end_2025: u64 = 1767225600000;   // 2026-01-01 00:00:00 UTC in ms
+        let end_2025: u64 = 1767225600000; // 2026-01-01 00:00:00 UTC in ms
 
         let history_path = get_claude_dir().join("history.jsonl");
         let projects_dir = get_claude_dir().join("projects");
@@ -5265,7 +6523,9 @@ async fn get_annual_report_2025() -> Result<AnnualReport2025, String> {
                             // Filter for 2025 only
                             if ts_ms >= start_2025 && ts_ms < end_2025 {
                                 let ts_secs = ts_ms / 1000;
-                                if let Some(dt) = chrono::DateTime::from_timestamp(ts_secs as i64, 0) {
+                                if let Some(dt) =
+                                    chrono::DateTime::from_timestamp(ts_secs as i64, 0)
+                                {
                                     let date = dt.format("%Y-%m-%d").to_string();
                                     *daily_activity.entry(date.clone()).or_insert(0) += 1;
 
@@ -5276,7 +6536,8 @@ async fn get_annual_report_2025() -> Result<AnnualReport2025, String> {
                                     *weekday_counts.entry(weekday).or_insert(0) += 1;
 
                                     // Track first and last dates
-                                    if first_date.is_none() || date < *first_date.as_ref().unwrap() {
+                                    if first_date.is_none() || date < *first_date.as_ref().unwrap()
+                                    {
                                         first_date = Some(date.clone());
                                     }
                                     if last_date.is_none() || date > *last_date.as_ref().unwrap() {
@@ -5339,7 +6600,8 @@ async fn get_annual_report_2025() -> Result<AnnualReport2025, String> {
                         continue;
                     }
 
-                    let project_id = project_path.file_name()
+                    let project_id = project_path
+                        .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("")
                         .to_string();
@@ -5373,26 +6635,38 @@ async fn get_annual_report_2025() -> Result<AnnualReport2025, String> {
                                 let mut msg_count = 0usize;
 
                                 for line in content.lines() {
-                                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
+                                    if let Ok(parsed) =
+                                        serde_json::from_str::<serde_json::Value>(line)
+                                    {
                                         // Check timestamp if available
-                                        if let Some(ts) = parsed.get("timestamp").and_then(|v| v.as_str()) {
+                                        if let Some(ts) =
+                                            parsed.get("timestamp").and_then(|v| v.as_str())
+                                        {
                                             if ts.starts_with("2025-") {
                                                 has_2025_activity = true;
                                             }
                                         }
                                         // Count non-meta messages
-                                        if parsed.get("type").and_then(|t| t.as_str()) != Some("meta") {
+                                        if parsed.get("type").and_then(|t| t.as_str())
+                                            != Some("meta")
+                                        {
                                             msg_count += 1;
                                         }
                                         // Extract commands from assistant messages (for fallback stats)
                                         if let Some(pattern) = &command_pattern {
-                                            if let Some(text) = parsed.get("message").and_then(|m| {
-                                                m.get("content").and_then(|c| c.as_str())
-                                            }) {
+                                            if let Some(text) =
+                                                parsed.get("message").and_then(|m| {
+                                                    m.get("content").and_then(|c| c.as_str())
+                                                })
+                                            {
                                                 for cap in pattern.captures_iter(text) {
                                                     if let Some(cmd_match) = cap.get(1) {
-                                                        let cmd = cmd_match.as_str().trim_start_matches('/').to_string();
-                                                        *command_counts.entry(cmd).or_insert(0) += 1;
+                                                        let cmd = cmd_match
+                                                            .as_str()
+                                                            .trim_start_matches('/')
+                                                            .to_string();
+                                                        *command_counts.entry(cmd).or_insert(0) +=
+                                                            1;
                                                     }
                                                 }
                                             }
@@ -5411,7 +6685,8 @@ async fn get_annual_report_2025() -> Result<AnnualReport2025, String> {
                     if proj_sessions > 0 {
                         total_sessions += proj_sessions;
                         total_messages += proj_messages;
-                        project_stats.insert(project_id, (actual_path, proj_sessions, proj_messages));
+                        project_stats
+                            .insert(project_id, (actual_path, proj_sessions, proj_messages));
                     }
                 }
             }
@@ -5475,9 +6750,7 @@ async fn get_annual_report_2025() -> Result<AnnualReport2025, String> {
         }
 
         // Count local commands
-        let total_commands = list_local_commands()
-            .map(|cmds| cmds.len())
-            .unwrap_or(0);
+        let total_commands = list_local_commands().map(|cmds| cmds.len()).unwrap_or(0);
 
         Ok(AnnualReport2025 {
             total_sessions,
@@ -5607,7 +6880,9 @@ async fn get_command_stats() -> Result<HashMap<String, usize>, String> {
 /// Returns command usage counts grouped by week (from pre-built index)
 /// Format: { "command_name": { "2024-W01": count, "2024-W02": count, ... } }
 #[tauri::command]
-fn get_command_weekly_stats(_weeks: Option<usize>) -> Result<HashMap<String, HashMap<String, usize>>, String> {
+fn get_command_weekly_stats(
+    _weeks: Option<usize>,
+) -> Result<HashMap<String, HashMap<String, usize>>, String> {
     // Read from pre-built index (created by build_search_index)
     let stats_path = get_command_stats_path();
 
@@ -5700,14 +6975,9 @@ fn get_settings() -> Result<ClaudeSettings, String> {
                                     .get("description")
                                     .and_then(|v| v.as_str())
                                     .map(String::from);
-                                let server_type = cfg
-                                    .get("type")
-                                    .and_then(|v| v.as_str())
-                                    .map(String::from);
-                                let url = cfg
-                                    .get("url")
-                                    .and_then(|v| v.as_str())
-                                    .map(String::from);
+                                let server_type =
+                                    cfg.get("type").and_then(|v| v.as_str()).map(String::from);
+                                let url = cfg.get("url").and_then(|v| v.as_str()).map(String::from);
                                 let command = cfg
                                     .get("command")
                                     .and_then(|v| v.as_str())
@@ -5812,18 +7082,29 @@ fn set_session_title(session_id: String, title: String) -> Result<(), String> {
         for account in fs::read_dir(device.path()).into_iter().flatten().flatten() {
             for file in fs::read_dir(account.path()).into_iter().flatten().flatten() {
                 let path = file.path();
-                let fname = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let fname = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 if !fname.starts_with("local_") || !fname.ends_with(".json") {
                     continue;
                 }
-                let Ok(content) = fs::read_to_string(&path) else { continue };
-                let Ok(mut meta) = serde_json::from_str::<serde_json::Value>(&content) else { continue };
+                let Ok(content) = fs::read_to_string(&path) else {
+                    continue;
+                };
+                let Ok(mut meta) = serde_json::from_str::<serde_json::Value>(&content) else {
+                    continue;
+                };
                 if meta.get("cliSessionId").and_then(|v| v.as_str()) != Some(&session_id) {
                     continue;
                 }
                 if let Some(obj) = meta.as_object_mut() {
                     obj.insert("title".into(), serde_json::Value::String(title.clone()));
-                    obj.insert("titleSource".into(), serde_json::Value::String("user".into()));
+                    obj.insert(
+                        "titleSource".into(),
+                        serde_json::Value::String("user".into()),
+                    );
                 }
                 let serialized = serde_json::to_string_pretty(&meta).map_err(|e| e.to_string())?;
                 fs::write(&path, serialized).map_err(|e| e.to_string())?;
@@ -5878,7 +7159,11 @@ fn reveal_session_file(project_id: String, session_id: String) -> Result<(), Str
 fn reveal_path(path: String, cwd: Option<String>) -> Result<(), String> {
     let expanded = if path.starts_with("~/") || path == "~" {
         let home = dirs::home_dir().ok_or("Cannot get home dir")?;
-        if path == "~" { home } else { home.join(&path[2..]) }
+        if path == "~" {
+            home
+        } else {
+            home.join(&path[2..])
+        }
     } else if path.starts_with('/') {
         std::path::PathBuf::from(&path)
     } else if let Some(base) = cwd.as_ref().filter(|s| !s.is_empty()) {
@@ -5926,7 +7211,11 @@ fn reveal_path(path: String, cwd: Option<String>) -> Result<(), String> {
 fn open_path(path: String, cwd: Option<String>) -> Result<(), String> {
     let expanded = if path.starts_with("~/") || path == "~" {
         let home = dirs::home_dir().ok_or("Cannot get home dir")?;
-        if path == "~" { home } else { home.join(&path[2..]) }
+        if path == "~" {
+            home
+        } else {
+            home.join(&path[2..])
+        }
     } else if path.starts_with('/') {
         std::path::PathBuf::from(&path)
     } else if let Some(base) = cwd.as_ref().filter(|s| !s.is_empty()) {
@@ -6041,7 +7330,9 @@ struct RelocationResult {
 
 /// Walk up `from`, returning (nearest_existing_ancestor, lost_root_path).
 /// `lost_root_path` is the last segment in the chain whose parent exists on disk.
-fn analyze_lost_path(from: &std::path::Path) -> (Option<std::path::PathBuf>, Option<std::path::PathBuf>) {
+fn analyze_lost_path(
+    from: &std::path::Path,
+) -> (Option<std::path::PathBuf>, Option<std::path::PathBuf>) {
     let mut lost_root: Option<std::path::PathBuf> = None;
     let mut cur = from.to_path_buf();
     loop {
@@ -6098,7 +7389,10 @@ async fn find_relocation_candidates(from: String) -> Result<RelocationResult, St
                 .args([
                     "-onlyin",
                     "/Users",
-                    &format!("kMDItemFSName == \"{}\" && kMDItemContentType == \"public.folder\"", leaf_owned.replace('"', "\\\"")),
+                    &format!(
+                        "kMDItemFSName == \"{}\" && kMDItemContentType == \"public.folder\"",
+                        leaf_owned.replace('"', "\\\"")
+                    ),
                 ])
                 .output()
         })
@@ -6217,7 +7511,11 @@ fn rewrite_app_session_cwds(from: &str, to: &str) -> Result<usize, String> {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
-                let Some(cwd) = value.get("cwd").and_then(|v| v.as_str()).map(|s| s.to_string()) else {
+                let Some(cwd) = value
+                    .get("cwd")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                else {
                     continue;
                 };
                 if cwd != from && !cwd.starts_with(&format!("{}/", from)) {
@@ -6247,7 +7545,8 @@ async fn migrate_session_cwd(from: String, to: String) -> Result<MigrateCwdResul
         return Err("from and to are required".into());
     }
     let npx = find_npx().ok_or_else(|| {
-        "找不到 npx — 请确认 Node.js 已安装并在 PATH 中（/opt/homebrew/bin 或 /usr/local/bin）".to_string()
+        "找不到 npx — 请确认 Node.js 已安装并在 PATH 中（/opt/homebrew/bin 或 /usr/local/bin）"
+            .to_string()
     })?;
 
     let from_clone = from.clone();
@@ -6292,11 +7591,17 @@ async fn migrate_session_cwd(from: String, to: String) -> Result<MigrateCwdResul
     if success {
         match rewrite_app_session_cwds(&from, &to) {
             Ok(n) if n > 0 => {
-                stderr.push_str(&format!("\n[lovcode] rewrote cwd in {} app session metadata files", n));
+                stderr.push_str(&format!(
+                    "\n[lovcode] rewrote cwd in {} app session metadata files",
+                    n
+                ));
             }
             Ok(_) => {}
             Err(e) => {
-                stderr.push_str(&format!("\n[lovcode] failed to rewrite app session metadata: {}", e));
+                stderr.push_str(&format!(
+                    "\n[lovcode] failed to rewrite app session metadata: {}",
+                    e
+                ));
             }
         }
     }
@@ -6380,85 +7685,121 @@ fn get_env_var(name: String) -> Option<String> {
     std::env::var(&name).ok()
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TodayCodingStats {
     pub lines_added: usize,
     pub lines_deleted: usize,
 }
 
+static TODAY_STATS_CACHE: LazyLock<Mutex<Option<(std::time::SystemTime, TodayCodingStats)>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+const TODAY_STATS_TTL: Duration = Duration::from_secs(30);
+
 #[tauri::command]
-fn get_today_coding_stats() -> Result<TodayCodingStats, String> {
+async fn get_today_coding_stats() -> Result<TodayCodingStats, String> {
+    if let Ok(guard) = TODAY_STATS_CACHE.lock() {
+        if let Some((fetched_at, stats)) = guard.as_ref() {
+            if fetched_at
+                .elapsed()
+                .map(|elapsed| elapsed < TODAY_STATS_TTL)
+                .unwrap_or(false)
+            {
+                return Ok(stats.clone());
+            }
+        }
+    }
+
+    let stats = tauri::async_runtime::spawn_blocking(get_today_coding_stats_blocking)
+        .await
+        .map_err(|e| e.to_string())??;
+
+    if let Ok(mut guard) = TODAY_STATS_CACHE.lock() {
+        *guard = Some((std::time::SystemTime::now(), stats.clone()));
+    }
+
+    Ok(stats)
+}
+
+fn get_today_coding_stats_blocking() -> Result<TodayCodingStats, String> {
     use std::process::Command;
 
-    let workspace_path = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("lovcode")
-        .join("workspace.json");
-
-    if !workspace_path.exists() {
+    let projects_dir = get_claude_dir().join("projects");
+    if !projects_dir.exists() {
         return Ok(TodayCodingStats {
             lines_added: 0,
             lines_deleted: 0,
         });
     }
 
-    let content = fs::read_to_string(&workspace_path).map_err(|e| e.to_string())?;
-    let workspace: serde_json::Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    // Collect project paths by decoding ~/.claude/projects/<encoded> dir names.
+    let mut project_paths: Vec<String> = Vec::new();
+    if let Ok(entries) = fs::read_dir(&projects_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let p = entry.path();
+            if p.is_dir() {
+                let id = p.file_name().unwrap().to_string_lossy().to_string();
+                project_paths.push(decode_project_path(&id));
+            }
+        }
+    }
 
     let mut total_added: usize = 0;
     let mut total_deleted: usize = 0;
+    let mut git_roots: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    if let Some(projects) = workspace.get("projects").and_then(|p| p.as_array()) {
-        for project in projects {
-            if let Some(path) = project.get("path").and_then(|p| p.as_str()) {
-                // Run git diff --stat for today
-                let output = Command::new("git")
-                    .args([
-                        "-C",
-                        path,
-                        "diff",
-                        "--shortstat",
-                        "--since=midnight",
-                        "HEAD",
-                    ])
-                    .output();
+    for path in &project_paths {
+        let path = path.as_str();
+        if !PathBuf::from(path).exists() {
+            continue;
+        }
 
-                if let Ok(output) = output {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    // Parse "X files changed, Y insertions(+), Z deletions(-)"
-                    for part in stdout.split(',') {
-                        let part = part.trim();
-                        if part.contains("insertion") {
-                            if let Some(num) = part.split_whitespace().next() {
-                                total_added += num.parse::<usize>().unwrap_or(0);
-                            }
-                        } else if part.contains("deletion") {
-                            if let Some(num) = part.split_whitespace().next() {
-                                total_deleted += num.parse::<usize>().unwrap_or(0);
-                            }
-                        }
-                    }
-                }
+        let output = Command::new("git")
+            .args(["-C", path, "rev-parse", "--show-toplevel"])
+            .output();
 
-                // Also check uncommitted changes
-                let output = Command::new("git")
-                    .args(["-C", path, "diff", "--shortstat"])
-                    .output();
+        let Ok(output) = output else { continue };
+        if !output.status.success() {
+            continue;
+        }
 
-                if let Ok(output) = output {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    for part in stdout.split(',') {
-                        let part = part.trim();
-                        if part.contains("insertion") {
-                            if let Some(num) = part.split_whitespace().next() {
-                                total_added += num.parse::<usize>().unwrap_or(0);
-                            }
-                        } else if part.contains("deletion") {
-                            if let Some(num) = part.split_whitespace().next() {
-                                total_deleted += num.parse::<usize>().unwrap_or(0);
-                            }
-                        }
-                    }
+        let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !root.is_empty() {
+            git_roots.insert(root);
+        }
+    }
+
+    let mut add_numstat = |bytes: &[u8]| {
+        let stdout = String::from_utf8_lossy(bytes);
+        for line in stdout.lines() {
+            let mut cols = line.split('\t');
+            let added = cols.next().unwrap_or("");
+            let deleted = cols.next().unwrap_or("");
+            if added == "-" || deleted == "-" {
+                continue;
+            }
+            total_added += added.parse::<usize>().unwrap_or(0);
+            total_deleted += deleted.parse::<usize>().unwrap_or(0);
+        }
+    };
+
+    for root in git_roots {
+        for args in [
+            vec![
+                "-C",
+                root.as_str(),
+                "log",
+                "--since=midnight",
+                "--numstat",
+                "--pretty=format:",
+            ],
+            vec!["-C", root.as_str(), "diff", "--cached", "--numstat"],
+            vec!["-C", root.as_str(), "diff", "--numstat"],
+        ] {
+            let output = Command::new("git").args(args).output();
+            if let Ok(output) = output {
+                if output.status.success() {
+                    add_numstat(&output.stdout);
                 }
             }
         }
@@ -6707,17 +8048,17 @@ fn set_provider_context_env(
 }
 
 #[tauri::command]
-fn snapshot_provider_context(
-    provider_key: String,
-    env_keys: Vec<String>,
-) -> Result<(), String> {
+fn snapshot_provider_context(provider_key: String, env_keys: Vec<String>) -> Result<(), String> {
     let settings_path = get_claude_dir().join("settings.json");
     if !settings_path.exists() {
         return Ok(());
     }
     let content = fs::read_to_string(&settings_path).map_err(|e| e.to_string())?;
     let settings: Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
-    let env = settings.get("env").cloned().unwrap_or(serde_json::json!({}));
+    let env = settings
+        .get("env")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
 
     let mut snapshot = serde_json::Map::new();
     for key in &env_keys {
@@ -6866,7 +8207,11 @@ async fn fetch_and_parse_maas_models(
         }
     }
 
-    println!("[maas-fetch] {} parser extracted {} models", parser_label, models.len());
+    println!(
+        "[maas-fetch] {} parser extracted {} models",
+        parser_label,
+        models.len()
+    );
 
     let notes = if models.is_empty() {
         Some(format!(
@@ -6882,10 +8227,8 @@ async fn fetch_and_parse_maas_models(
     };
 
     // Drop vendors that no model references (post de-dup)
-    let referenced: std::collections::HashSet<String> = models
-        .iter()
-        .filter_map(|m| m.vendor.clone())
-        .collect();
+    let referenced: std::collections::HashSet<String> =
+        models.iter().filter_map(|m| m.vendor.clone()).collect();
     vendors.retain(|v| referenced.contains(&v.id));
 
     Ok(FetchParseResult {
@@ -6925,7 +8268,8 @@ fn synthesize_vendors_from_models(models: &[MaasModel]) -> Vec<Vendor> {
 fn parse_zenmux(root: &serde_json::Value) -> Option<(Vec<MaasModel>, Vec<Vendor>)> {
     let arr = root.get("data")?.get("models")?.as_array()?;
     let mut out: Vec<MaasModel> = Vec::with_capacity(arr.len());
-    let mut vendor_map: std::collections::HashMap<String, Vendor> = std::collections::HashMap::new();
+    let mut vendor_map: std::collections::HashMap<String, Vendor> =
+        std::collections::HashMap::new();
     let mut vendor_order: Vec<String> = Vec::new();
 
     for item in arr {
@@ -6949,13 +8293,14 @@ fn parse_zenmux(root: &serde_json::Value) -> Option<(Vec<MaasModel>, Vec<Vendor>
             .unwrap_or_else(|| derive_display_name(slug));
         // "Anthropic: Claude Sonnet 4.6" → "Claude Sonnet 4.6"
         let (vendor_label_from_name, display_name) = match raw_name.split_once(':') {
-            Some((vlabel, rest)) => (
-                Some(vlabel.trim().to_string()),
-                rest.trim().to_string(),
-            ),
+            Some((vlabel, rest)) => (Some(vlabel.trim().to_string()), rest.trim().to_string()),
             None => (None, raw_name.clone()),
         };
-        let display_name = if display_name.is_empty() { raw_name } else { display_name };
+        let display_name = if display_name.is_empty() {
+            raw_name
+        } else {
+            display_name
+        };
 
         let vendor_id_raw = obj
             .get("author")
@@ -6984,9 +8329,9 @@ fn parse_zenmux(root: &serde_json::Value) -> Option<(Vec<MaasModel>, Vec<Vendor>
                     vendor_order.push(vid.clone());
                     Vendor {
                         id: vid.clone(),
-                        name: vendor_label_from_name
-                            .clone()
-                            .unwrap_or_else(|| vendor_id_raw.clone().unwrap_or_else(|| vid.clone())),
+                        name: vendor_label_from_name.clone().unwrap_or_else(|| {
+                            vendor_id_raw.clone().unwrap_or_else(|| vid.clone())
+                        }),
                         icon_url: icon_url.clone(),
                         description: None,
                         website_url: None,
@@ -7048,11 +8393,7 @@ fn extract_models_heuristic(root: &serde_json::Value) -> Vec<MaasModel> {
     out
 }
 
-fn walk_for_models(
-    val: &serde_json::Value,
-    parent_key: Option<&str>,
-    out: &mut Vec<MaasModel>,
-) {
+fn walk_for_models(val: &serde_json::Value, parent_key: Option<&str>, out: &mut Vec<MaasModel>) {
     match val {
         serde_json::Value::Array(arr) => {
             // If the parent key suggests this is a model list, try to pull each item
@@ -7087,11 +8428,19 @@ fn try_extract_model(v: &serde_json::Value) -> Option<MaasModel> {
     let obj = v.as_object()?;
 
     // Find the canonical model id field (what the API expects in `model:` param)
-    let model_name = ["modelName", "model_name", "model_id", "modelId", "model", "slug", "id"]
-        .iter()
-        .find_map(|k| obj.get(*k).and_then(|x| x.as_str()))
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty() && looks_like_model_id(s))?;
+    let model_name = [
+        "modelName",
+        "model_name",
+        "model_id",
+        "modelId",
+        "model",
+        "slug",
+        "id",
+    ]
+    .iter()
+    .find_map(|k| obj.get(*k).and_then(|x| x.as_str()))
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty() && looks_like_model_id(s))?;
 
     // Display name
     let display_name = ["displayName", "display_name", "name", "title", "label"]
@@ -7108,13 +8457,20 @@ fn try_extract_model(v: &serde_json::Value) -> Option<MaasModel> {
         .unwrap_or_else(|| model_name.clone());
     let id = slugify_id(&id_source);
 
-    let vendor = ["author", "owned_by", "ownedBy", "vendor", "organization", "org"]
-        .iter()
-        .find_map(|k| obj.get(*k).and_then(|x| x.as_str()))
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| model_name.split_once('/').map(|(p, _)| p.to_string()))
-        .map(|s| slugify_id(&s));
+    let vendor = [
+        "author",
+        "owned_by",
+        "ownedBy",
+        "vendor",
+        "organization",
+        "org",
+    ]
+    .iter()
+    .find_map(|k| obj.get(*k).and_then(|x| x.as_str()))
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty())
+    .or_else(|| model_name.split_once('/').map(|(p, _)| p.to_string()))
+    .map(|s| slugify_id(&s));
 
     let description = ["description", "summary"]
         .iter()
@@ -7129,7 +8485,11 @@ fn try_extract_model(v: &serde_json::Value) -> Option<MaasModel> {
         .filter(|s| !s.is_empty());
 
     let modal = |k1: &str, k2: &str| -> Option<Vec<String>> {
-        if let Some(arr) = obj.get(k1).or_else(|| obj.get(k2)).and_then(|x| x.as_array()) {
+        if let Some(arr) = obj
+            .get(k1)
+            .or_else(|| obj.get(k2))
+            .and_then(|x| x.as_array())
+        {
             let v: Vec<String> = arr
                 .iter()
                 .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
@@ -7146,9 +8506,14 @@ fn try_extract_model(v: &serde_json::Value) -> Option<MaasModel> {
     let input_modalities = modal("input_modalities", "inputModalities");
     let output_modalities = modal("output_modalities", "outputModalities");
 
-    let context_window = ["context_window", "contextWindow", "context_length", "max_input_tokens"]
-        .iter()
-        .find_map(|k| obj.get(*k).and_then(|x| x.as_u64()));
+    let context_window = [
+        "context_window",
+        "contextWindow",
+        "context_length",
+        "max_input_tokens",
+    ]
+    .iter()
+    .find_map(|k| obj.get(*k).and_then(|x| x.as_u64()));
 
     Some(MaasModel {
         id,
@@ -7250,7 +8615,11 @@ fn update_settings_permission_field(field: String, value: Value) -> Result<(), S
         serde_json::json!({})
     };
 
-    if !settings.get("permissions").and_then(|v| v.as_object()).is_some() {
+    if !settings
+        .get("permissions")
+        .and_then(|v| v.as_object())
+        .is_some()
+    {
         settings["permissions"] = serde_json::json!({});
     }
     settings["permissions"][&field] = value;
@@ -7274,7 +8643,11 @@ fn add_permission_directory(path: String) -> Result<(), String> {
         serde_json::json!({})
     };
 
-    if !settings.get("permissions").and_then(|v| v.as_object()).is_some() {
+    if !settings
+        .get("permissions")
+        .and_then(|v| v.as_object())
+        .is_some()
+    {
         settings["permissions"] = serde_json::json!({});
     }
 
@@ -7336,7 +8709,11 @@ fn toggle_plugin(plugin_id: String, enabled: bool) -> Result<(), String> {
         serde_json::json!({})
     };
 
-    if !settings.get("enabledPlugins").and_then(|v| v.as_object()).is_some() {
+    if !settings
+        .get("enabledPlugins")
+        .and_then(|v| v.as_object())
+        .is_some()
+    {
         settings["enabledPlugins"] = serde_json::json!({});
     }
     settings["enabledPlugins"][&plugin_id] = Value::Bool(enabled);
@@ -7416,21 +8793,22 @@ fn list_installed_plugins() -> Result<Vec<InstalledPlugin>, String> {
 fn list_extension_marketplaces() -> Result<Vec<ExtensionMarketplace>, String> {
     let settings_path = get_claude_dir().join("settings.json");
 
-    let mut marketplaces = vec![
-        ExtensionMarketplace {
-            id: "claude-plugins-official".to_string(),
-            name: "Claude Plugins Official".to_string(),
-            repo: Some("anthropics/claude-code".to_string()),
-            path: None,
-            is_official: true,
-        },
-    ];
+    let mut marketplaces = vec![ExtensionMarketplace {
+        id: "claude-plugins-official".to_string(),
+        name: "Claude Plugins Official".to_string(),
+        repo: Some("anthropics/claude-code".to_string()),
+        path: None,
+        is_official: true,
+    }];
 
     if settings_path.exists() {
         let content = fs::read_to_string(&settings_path).map_err(|e| e.to_string())?;
         let settings: Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
 
-        if let Some(extra) = settings.get("extraKnownMarketplaces").and_then(|v| v.as_object()) {
+        if let Some(extra) = settings
+            .get("extraKnownMarketplaces")
+            .and_then(|v| v.as_object())
+        {
             for (id, config) in extra {
                 let repo = config
                     .get("source")
@@ -7458,7 +8836,11 @@ fn list_extension_marketplaces() -> Result<Vec<ExtensionMarketplace>, String> {
 }
 
 #[tauri::command]
-async fn fetch_marketplace_plugins(owner: String, repo: String, plugins_path: Option<String>) -> Result<Vec<MarketplacePlugin>, String> {
+async fn fetch_marketplace_plugins(
+    owner: String,
+    repo: String,
+    plugins_path: Option<String>,
+) -> Result<Vec<MarketplacePlugin>, String> {
     let path = plugins_path.unwrap_or_else(|| "plugins".to_string());
     let url = format!(
         "https://api.github.com/repos/{}/{}/contents/{}",
@@ -7512,14 +8894,20 @@ async fn fetch_marketplace_plugins(owner: String, repo: String, plugins_path: Op
 }
 
 #[tauri::command]
-async fn install_extension(plugin_id: String, marketplace: Option<String>) -> Result<String, String> {
+async fn install_extension(
+    plugin_id: String,
+    marketplace: Option<String>,
+) -> Result<String, String> {
     let full_id = if let Some(mkt) = marketplace {
         format!("{}@{}", plugin_id, mkt)
     } else {
         plugin_id
     };
 
-    let command = format!("claude plugin install {}", shell_escape::escape(full_id.into()));
+    let command = format!(
+        "claude plugin install {}",
+        shell_escape::escape(full_id.into())
+    );
     let home = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .to_string_lossy()
@@ -7530,7 +8918,10 @@ async fn install_extension(plugin_id: String, marketplace: Option<String>) -> Re
 
 #[tauri::command]
 async fn uninstall_extension(plugin_id: String) -> Result<String, String> {
-    let command = format!("claude plugin uninstall {}", shell_escape::escape(plugin_id.into()));
+    let command = format!(
+        "claude plugin uninstall {}",
+        shell_escape::escape(plugin_id.into())
+    );
     let home = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .to_string_lossy()
@@ -7541,7 +8932,10 @@ async fn uninstall_extension(plugin_id: String) -> Result<String, String> {
 
 #[tauri::command]
 async fn add_extension_marketplace(source: String) -> Result<String, String> {
-    let command = format!("claude plugin marketplace add {}", shell_escape::escape(source.into()));
+    let command = format!(
+        "claude plugin marketplace add {}",
+        shell_escape::escape(source.into())
+    );
     let home = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .to_string_lossy()
@@ -7552,7 +8946,10 @@ async fn add_extension_marketplace(source: String) -> Result<String, String> {
 
 #[tauri::command]
 async fn remove_extension_marketplace(name: String) -> Result<String, String> {
-    let command = format!("claude plugin marketplace remove {}", shell_escape::escape(name.into()));
+    let command = format!(
+        "claude plugin marketplace remove {}",
+        shell_escape::escape(name.into())
+    );
     let home = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .to_string_lossy()
@@ -7586,7 +8983,10 @@ fn save_disabled_hooks(disabled_hooks: &Value) -> Result<(), String> {
 // Generate a unique key for a hook based on its content
 fn get_hook_content_key(hook: &Value) -> String {
     // Use command or prompt as the key, with type prefix for uniqueness
-    let hook_type = hook.get("type").and_then(|t| t.as_str()).unwrap_or("unknown");
+    let hook_type = hook
+        .get("type")
+        .and_then(|t| t.as_str())
+        .unwrap_or("unknown");
     let content = hook
         .get("command")
         .or_else(|| hook.get("prompt"))
@@ -7873,10 +9273,20 @@ async fn test_claude_cli_oauth() -> Result<ClaudeCliTestResult, String> {
     let code = output.status.code().unwrap_or(-1);
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    println!("claude cli oauth probe code={} stdout_len={} stderr={}", code, stdout.len(), stderr);
+    println!(
+        "claude cli oauth probe code={} stdout_len={} stderr={}",
+        code,
+        stdout.len(),
+        stderr
+    );
 
     let ok = output.status.success() && !stdout.trim().is_empty();
-    Ok(ClaudeCliTestResult { ok, code, stdout, stderr })
+    Ok(ClaudeCliTestResult {
+        ok,
+        code,
+        stdout,
+        stderr,
+    })
 }
 
 #[tauri::command]
@@ -7901,7 +9311,10 @@ async fn test_claude_cli(
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    println!("claude cli test code={} stdout={} stderr={}", code, stdout, stderr);
+    println!(
+        "claude cli test code={} stdout={} stderr={}",
+        code, stdout, stderr
+    );
 
     Ok(ClaudeCliTestResult {
         ok: output.status.success(),
@@ -8007,9 +9420,10 @@ fn detect_claude_code_install_type() -> (ClaudeCodeInstallType, Option<String>) 
 #[tauri::command]
 async fn get_claude_code_version_info() -> Result<ClaudeCodeVersionInfo, String> {
     // Detect installation type and current version
-    let (install_type, current_version) = tauri::async_runtime::spawn_blocking(detect_claude_code_install_type)
-        .await
-        .map_err(|e| e.to_string())?;
+    let (install_type, current_version) =
+        tauri::async_runtime::spawn_blocking(detect_claude_code_install_type)
+            .await
+            .map_err(|e| e.to_string())?;
 
     // Fetch available versions from npm registry API (no local npm needed)
     let client = reqwest::Client::builder()
@@ -8070,7 +9484,10 @@ async fn get_claude_code_version_info() -> Result<ClaudeCodeVersionInfo, String>
         .into_iter()
         .map(|v| {
             let downloads = downloads_map.get(&v).copied().unwrap_or(0);
-            VersionWithDownloads { version: v, downloads }
+            VersionWithDownloads {
+                version: v,
+                downloads,
+            }
         })
         .collect();
 
@@ -8406,93 +9823,6 @@ fn pty_flush_scrollback() {
 }
 
 // ============================================================================
-// Workspace Commands
-// ============================================================================
-
-#[tauri::command]
-fn workspace_load() -> Result<workspace_store::WorkspaceData, String> {
-    workspace_store::load_workspace()
-}
-
-#[tauri::command]
-fn workspace_save(data: workspace_store::WorkspaceData) -> Result<(), String> {
-    workspace_store::save_workspace(&data)
-}
-
-#[tauri::command]
-fn workspace_add_project(path: String) -> Result<workspace_store::WorkspaceProject, String> {
-    workspace_store::add_project(path)
-}
-
-#[tauri::command]
-fn workspace_list_projects() -> Result<Vec<workspace_store::WorkspaceProject>, String> {
-    workspace_store::load_workspace().map(|d| d.projects)
-}
-
-#[tauri::command]
-fn workspace_remove_project(id: String) -> Result<(), String> {
-    workspace_store::remove_project(&id)
-}
-
-#[tauri::command]
-fn workspace_set_active_project(id: String) -> Result<(), String> {
-    workspace_store::set_active_project(&id)
-}
-
-#[tauri::command]
-fn workspace_create_feature(project_id: String, name: String, description: Option<String>) -> Result<workspace_store::Feature, String> {
-    workspace_store::create_feature(&project_id, name, description)
-}
-
-#[tauri::command]
-fn workspace_rename_feature(feature_id: String, name: String) -> Result<(), String> {
-    workspace_store::rename_feature(&feature_id, name)
-}
-
-#[tauri::command]
-fn workspace_update_feature_status(
-    project_id: String,
-    feature_id: String,
-    status: workspace_store::FeatureStatus,
-) -> Result<(), String> {
-    workspace_store::update_feature_status(&project_id, &feature_id, status)
-}
-
-#[tauri::command]
-fn workspace_delete_feature(project_id: String, feature_id: String) -> Result<(), String> {
-    workspace_store::delete_feature(&project_id, &feature_id)
-}
-
-#[tauri::command]
-fn workspace_set_active_feature(project_id: String, feature_id: String) -> Result<(), String> {
-    workspace_store::set_active_feature(&project_id, &feature_id)
-}
-
-#[tauri::command]
-fn workspace_add_panel(
-    project_id: String,
-    feature_id: String,
-    panel: workspace_store::PanelState,
-) -> Result<(), String> {
-    workspace_store::add_panel_to_feature(&project_id, &feature_id, panel)
-}
-
-#[tauri::command]
-fn workspace_remove_panel(project_id: String, feature_id: String, panel_id: String) -> Result<(), String> {
-    workspace_store::remove_panel_from_feature(&project_id, &feature_id, &panel_id)
-}
-
-#[tauri::command]
-fn workspace_toggle_panel_shared(project_id: String, panel_id: String) -> Result<bool, String> {
-    workspace_store::toggle_panel_shared(&project_id, &panel_id)
-}
-
-#[tauri::command]
-fn workspace_get_pending_reviews() -> Result<Vec<(String, String, String)>, String> {
-    workspace_store::get_pending_reviews()
-}
-
-// ============================================================================
 // Hook Watcher Commands
 // ============================================================================
 
@@ -8517,7 +9847,12 @@ fn hook_get_monitored() -> Vec<String> {
 }
 
 #[tauri::command]
-fn hook_notify_complete(app_handle: tauri::AppHandle, project_id: String, feature_id: String, feature_name: String) {
+fn hook_notify_complete(
+    app_handle: tauri::AppHandle,
+    project_id: String,
+    feature_id: String,
+    feature_name: String,
+) {
     hook_watcher::notify_feature_complete(&app_handle, &project_id, &feature_id, &feature_name);
 }
 
@@ -8528,7 +9863,7 @@ fn hook_notify_complete(app_handle: tauri::AppHandle, project_id: String, featur
 /// Find project logo from common locations and return as base64 data URL
 #[tauri::command]
 fn get_project_logo(project_path: String) -> Option<String> {
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
 
     let logo_paths = [
         "assets/logo.svg",
@@ -8583,9 +9918,12 @@ fn list_project_logos(project_path: String) -> Vec<LogoVersion> {
             if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
                 // Match logo-*.png, logo.png, logo.svg patterns
                 if (filename.starts_with("logo") || filename.starts_with("icon"))
-                   && (filename.ends_with(".png") || filename.ends_with(".svg") || filename.ends_with(".jpg"))
+                    && (filename.ends_with(".png")
+                        || filename.ends_with(".svg")
+                        || filename.ends_with(".jpg"))
                 {
-                    let created_at = entry.metadata()
+                    let created_at = entry
+                        .metadata()
                         .ok()
                         .and_then(|m| m.modified().ok())
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
@@ -8593,7 +9931,10 @@ fn list_project_logos(project_path: String) -> Vec<LogoVersion> {
                         .unwrap_or(0);
 
                     let path_str = path.to_string_lossy().to_string();
-                    let is_current = current_logo.as_ref().map(|c| c == &path_str).unwrap_or(false);
+                    let is_current = current_logo
+                        .as_ref()
+                        .map(|c| c == &path_str)
+                        .unwrap_or(false);
 
                     versions.push(LogoVersion {
                         path: path_str,
@@ -8639,8 +9980,12 @@ fn get_current_logo_path(project: &PathBuf) -> Option<String> {
 
 /// Save base64 logo data to project assets
 #[tauri::command]
-fn save_project_logo(project_path: String, base64_data: String, filename: String) -> Result<String, String> {
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
+fn save_project_logo(
+    project_path: String,
+    base64_data: String,
+    filename: String,
+) -> Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
 
     let project = PathBuf::from(&project_path);
     let assets_dir = project.join("assets");
@@ -8650,26 +9995,29 @@ fn save_project_logo(project_path: String, base64_data: String, filename: String
         .map_err(|e| format!("Failed to create assets directory: {}", e))?;
 
     // Decode base64
-    let data = STANDARD.decode(&base64_data)
+    let data = STANDARD
+        .decode(&base64_data)
         .map_err(|e| format!("Failed to decode base64: {}", e))?;
 
     // Save versioned file
     let versioned_path = assets_dir.join(&filename);
-    fs::write(&versioned_path, &data)
-        .map_err(|e| format!("Failed to write logo: {}", e))?;
+    fs::write(&versioned_path, &data).map_err(|e| format!("Failed to write logo: {}", e))?;
 
     // Also save as logo.png (current)
     let ext = filename.rsplit('.').next().unwrap_or("png");
     let current_path = assets_dir.join(format!("logo.{}", ext));
-    fs::write(&current_path, &data)
-        .map_err(|e| format!("Failed to write current logo: {}", e))?;
+    fs::write(&current_path, &data).map_err(|e| format!("Failed to write current logo: {}", e))?;
 
     Ok(versioned_path.to_string_lossy().to_string())
 }
 
 /// Copy external file to project assets as logo
 #[tauri::command]
-fn copy_file_to_project_assets(source_path: String, project_path: String, target_filename: String) -> Result<String, String> {
+fn copy_file_to_project_assets(
+    source_path: String,
+    project_path: String,
+    target_filename: String,
+) -> Result<String, String> {
     let source = PathBuf::from(&source_path);
     let project = PathBuf::from(&project_path);
     let assets_dir = project.join("assets");
@@ -8680,8 +10028,7 @@ fn copy_file_to_project_assets(source_path: String, project_path: String, target
 
     // Copy to target filename
     let target_path = assets_dir.join(&target_filename);
-    fs::copy(&source, &target_path)
-        .map_err(|e| format!("Failed to copy file: {}", e))?;
+    fs::copy(&source, &target_path).map_err(|e| format!("Failed to copy file: {}", e))?;
 
     Ok(target_path.to_string_lossy().to_string())
 }
@@ -8697,14 +10044,11 @@ fn set_current_project_logo(project_path: String, logo_path: String) -> Result<(
         return Err("Logo file does not exist".to_string());
     }
 
-    let ext = source.extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("png");
+    let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("png");
 
     // Copy as current logo
     let current_path = assets_dir.join(format!("logo.{}", ext));
-    fs::copy(&source, &current_path)
-        .map_err(|e| format!("Failed to set current logo: {}", e))?;
+    fs::copy(&source, &current_path).map_err(|e| format!("Failed to set current logo: {}", e))?;
 
     Ok(())
 }
@@ -8721,12 +10065,13 @@ fn delete_project_logo(project_path: String, logo_path: String) -> Result<(), St
     // Don't allow deleting the current logo (logo.png/logo.svg)
     if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
         if filename == "logo.png" || filename == "logo.svg" {
-            return Err("Cannot delete current logo. Set another version as current first.".to_string());
+            return Err(
+                "Cannot delete current logo. Set another version as current first.".to_string(),
+            );
         }
     }
 
-    fs::remove_file(&path)
-        .map_err(|e| format!("Failed to delete logo: {}", e))?;
+    fs::remove_file(&path).map_err(|e| format!("Failed to delete logo: {}", e))?;
 
     Ok(())
 }
@@ -8734,7 +10079,7 @@ fn delete_project_logo(project_path: String, logo_path: String) -> Result<(), St
 /// Read file as base64
 #[tauri::command]
 fn read_file_base64(path: String) -> Result<String, String> {
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
 
     let file_path = PathBuf::from(&path);
 
@@ -8742,8 +10087,7 @@ fn read_file_base64(path: String) -> Result<String, String> {
         return Err(format!("File does not exist: {}", path));
     }
 
-    let data = fs::read(&file_path)
-        .map_err(|e| format!("Failed to read file: {}", e))?;
+    let data = fs::read(&file_path).map_err(|e| format!("Failed to read file: {}", e))?;
 
     Ok(STANDARD.encode(&data))
 }
@@ -8757,7 +10101,11 @@ async fn exec_shell_command(command: String, cwd: String) -> Result<String, Stri
     let output = {
         // On Windows, use PowerShell with -WorkingDirectory
         Command::new("powershell")
-            .args(["-NoProfile", "-Command", &format!("Set-Location '{}'; {}", cwd, command)])
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!("Set-Location '{}'; {}", cwd, command),
+            ])
             .output()
             .await
             .map_err(|e| format!("Failed to run command: {}", e))?
@@ -8803,8 +10151,8 @@ fn get_file_metadata(path: String) -> Result<FileMetadata, String> {
         return Err(format!("File does not exist: {}", path));
     }
 
-    let metadata = fs::metadata(&file_path)
-        .map_err(|e| format!("Failed to get metadata: {}", e))?;
+    let metadata =
+        fs::metadata(&file_path).map_err(|e| format!("Failed to get metadata: {}", e))?;
 
     let modified = metadata
         .modified()
@@ -8837,8 +10185,7 @@ fn read_file(path: String) -> Result<String, String> {
         return Err(format!("Not a file: {}", path));
     }
 
-    fs::read_to_string(&file_path)
-        .map_err(|e| format!("Failed to read file: {}", e))
+    fs::read_to_string(&file_path).map_err(|e| format!("Failed to read file: {}", e))
 }
 
 /// List directory contents (non-recursive, respects .gitignore patterns)
@@ -8856,15 +10203,29 @@ fn list_directory(path: String) -> Result<Vec<DirEntry>, String> {
 
     // Common patterns to ignore
     let ignore_patterns = [
-        ".git", "node_modules", ".DS_Store", "target", "dist", "build",
-        ".next", ".nuxt", ".output", "__pycache__", ".pytest_cache",
-        ".venv", "venv", ".idea", ".vscode", "*.pyc", ".turbo",
+        ".git",
+        "node_modules",
+        ".DS_Store",
+        "target",
+        "dist",
+        "build",
+        ".next",
+        ".nuxt",
+        ".output",
+        "__pycache__",
+        ".pytest_cache",
+        ".venv",
+        "venv",
+        ".idea",
+        ".vscode",
+        "*.pyc",
+        ".turbo",
     ];
 
     let mut entries: Vec<DirEntry> = Vec::new();
 
-    let read_dir = fs::read_dir(&dir_path)
-        .map_err(|e| format!("Failed to read directory: {}", e))?;
+    let read_dir =
+        fs::read_dir(&dir_path).map_err(|e| format!("Failed to read directory: {}", e))?;
 
     for entry in read_dir.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
@@ -8890,12 +10251,10 @@ fn list_directory(path: String) -> Result<Vec<DirEntry>, String> {
     }
 
     // Sort: directories first, then alphabetically
-    entries.sort_by(|a, b| {
-        match (a.is_dir, b.is_dir) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-        }
+    entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
     });
 
     Ok(entries)
@@ -8928,7 +10287,8 @@ pub struct CommitNote {
 fn parse_feat_from_message(message: &str) -> Option<String> {
     // Match patterns like: type(scope): message
     let re = regex::Regex::new(r"^\w+\(([a-z0-9-]+)\):").ok()?;
-    re.captures(message).and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
+    re.captures(message)
+        .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
 }
 
 /// Get git log for a project
@@ -8939,7 +10299,8 @@ fn git_log(project_path: String, limit: Option<usize>) -> Result<Vec<CommitInfo>
     let limit = limit.unwrap_or(100);
     let output = Command::new("git")
         .args([
-            "-C", &project_path,
+            "-C",
+            &project_path,
             "log",
             &format!("-{}", limit),
             "--format=%H|%h|%s|%at|%an",
@@ -8982,7 +10343,8 @@ fn git_get_note(project_path: String, commit_hash: String) -> Result<Option<Comm
 
     let output = Command::new("git")
         .args([
-            "-C", &project_path,
+            "-C",
+            &project_path,
             "notes",
             "--ref=lovcode",
             "show",
@@ -8997,8 +10359,8 @@ fn git_get_note(project_path: String, commit_hash: String) -> Result<Option<Comm
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let note: CommitNote = serde_json::from_str(&stdout)
-        .map_err(|e| format!("Failed to parse note: {}", e))?;
+    let note: CommitNote =
+        serde_json::from_str(&stdout).map_err(|e| format!("Failed to parse note: {}", e))?;
 
     Ok(Some(note))
 }
@@ -9008,18 +10370,20 @@ fn git_get_note(project_path: String, commit_hash: String) -> Result<Option<Comm
 fn git_set_note(project_path: String, commit_hash: String, note: CommitNote) -> Result<(), String> {
     use std::process::Command;
 
-    let note_json = serde_json::to_string(&note)
-        .map_err(|e| format!("Failed to serialize note: {}", e))?;
+    let note_json =
+        serde_json::to_string(&note).map_err(|e| format!("Failed to serialize note: {}", e))?;
 
     // Try to add note first, if it exists, use --force to overwrite
     let output = Command::new("git")
         .args([
-            "-C", &project_path,
+            "-C",
+            &project_path,
             "notes",
             "--ref=lovcode",
             "add",
             "-f",
-            "-m", &note_json,
+            "-m",
+            &note_json,
             &commit_hash,
         ])
         .output()
@@ -9039,12 +10403,7 @@ fn git_revert(project_path: String, commit_hash: String) -> Result<String, Strin
     use std::process::Command;
 
     let output = Command::new("git")
-        .args([
-            "-C", &project_path,
-            "revert",
-            "--no-edit",
-            &commit_hash,
-        ])
+        .args(["-C", &project_path, "revert", "--no-edit", &commit_hash])
         .output()
         .map_err(|e| format!("Failed to run git revert: {}", e))?;
 
@@ -9059,7 +10418,9 @@ fn git_revert(project_path: String, commit_hash: String) -> Result<String, Strin
         .output()
         .map_err(|e| format!("Failed to get new commit: {}", e))?;
 
-    let new_hash = String::from_utf8_lossy(&new_commit.stdout).trim().to_string();
+    let new_hash = String::from_utf8_lossy(&new_commit.stdout)
+        .trim()
+        .to_string();
     Ok(new_hash)
 }
 
@@ -9084,7 +10445,12 @@ fn git_has_changes(project_path: String) -> Result<bool, String> {
 
 /// Auto commit with feat name
 #[tauri::command]
-fn git_auto_commit(project_path: String, feat_name: String, feat_id: String, message: String) -> Result<Option<String>, String> {
+fn git_auto_commit(
+    project_path: String,
+    feat_name: String,
+    feat_id: String,
+    message: String,
+) -> Result<Option<String>, String> {
     use std::process::Command;
 
     // Check if there are changes
@@ -9122,7 +10488,9 @@ fn git_auto_commit(project_path: String, feat_name: String, feat_id: String, mes
         .output()
         .map_err(|e| format!("Failed to get commit hash: {}", e))?;
 
-    let hash = String::from_utf8_lossy(&hash_output.stdout).trim().to_string();
+    let hash = String::from_utf8_lossy(&hash_output.stdout)
+        .trim()
+        .to_string();
 
     // Add note with feat association
     let note = CommitNote {
@@ -9148,7 +10516,9 @@ fn git_generate_changelog(
     let filtered: Vec<&CommitInfo> = commits
         .iter()
         .filter(|c| {
-            let feat_match = c.feat_name.as_ref()
+            let feat_match = c
+                .feat_name
+                .as_ref()
                 .map(|f| feat_names.contains(f))
                 .unwrap_or(false);
             let date_match = from_date.map(|d| c.timestamp >= d).unwrap_or(true);
@@ -9189,20 +10559,18 @@ fn git_generate_changelog(
 
 #[tauri::command]
 async fn diagnostics_detect_stack(project_path: String) -> Result<diagnostics::TechStack, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        diagnostics::detect_tech_stack(&project_path)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || diagnostics::detect_tech_stack(&project_path))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-async fn diagnostics_check_env(project_path: String) -> Result<diagnostics::EnvCheckResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        diagnostics::check_env_vars(&project_path)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+async fn diagnostics_check_env(
+    project_path: String,
+) -> Result<diagnostics::EnvCheckResult, String> {
+    tauri::async_runtime::spawn_blocking(move || diagnostics::check_env_vars(&project_path))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -9211,7 +10579,11 @@ fn diagnostics_add_missing_keys(project_path: String, keys: Vec<String>) -> Resu
 }
 
 #[tauri::command]
-async fn diagnostics_scan_file_lines(project_path: String, limit: usize, ignored_paths: Vec<String>) -> Result<Vec<diagnostics::FileLineCount>, String> {
+async fn diagnostics_scan_file_lines(
+    project_path: String,
+    limit: usize,
+    ignored_paths: Vec<String>,
+) -> Result<Vec<diagnostics::FileLineCount>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         diagnostics::scan_file_lines(&project_path, limit, &ignored_paths)
     })
@@ -9258,9 +10630,12 @@ fn activate_and_focus_window(window: &tauri::WebviewWindow) {
 
         // 延迟 50ms 后执行
         let delay: f64 = 0.05;
-        let _: () = msg_send![ns_win, performSelector:sel_make_key withObject:nil_ptr afterDelay:delay];
-        let _: () = msg_send![ns_win, performSelector:sel_order_front withObject:nil_ptr afterDelay:delay];
-        let _: () = msg_send![ns_win, performSelector:sel_make_main withObject:nil_ptr afterDelay:delay];
+        let _: () =
+            msg_send![ns_win, performSelector:sel_make_key withObject:nil_ptr afterDelay:delay];
+        let _: () =
+            msg_send![ns_win, performSelector:sel_order_front withObject:nil_ptr afterDelay:delay];
+        let _: () =
+            msg_send![ns_win, performSelector:sel_make_main withObject:nil_ptr afterDelay:delay];
 
         println!("[Lovcode] Window activation scheduled (50ms delay)");
     }
@@ -9272,42 +10647,26 @@ fn activate_and_focus_window(window: &tauri::WebviewWindow) {
 /// On non-macOS this is a no-op.
 #[tauri::command]
 fn make_window_nonactivating_panel(window: tauri::WebviewWindow) -> Result<(), String> {
+    // Previously this swapped the NSWindow's isa to NSPanel via object_setClass
+    // to enable NSWindowStyleMaskNonactivatingPanel. That broke Cocoa KVO
+    // metadata on TaoWindow and crashed the app when system components
+    // (ScreenTime / ViewBridge) tried to unregister observers from the webview
+    // during hide/close. Now we keep TaoWindow as-is and only float it above
+    // other windows — losing the "doesn't steal focus" property but staying
+    // crash-free.
     #[cfg(target_os = "macos")]
     unsafe {
         use cocoa::base::id;
-        use objc::runtime::Class;
         use objc::*;
-
-        // objc 0.2 doesn't re-export `object_setClass` from libobjc, so link it
-        // ourselves. Signature: id object_setClass(id, Class).
-        extern "C" {
-            fn object_setClass(obj: *mut objc::runtime::Object, cls: *const Class) -> *mut objc::runtime::Object;
-        }
 
         let ns_window = window.ns_window().map_err(|e| e.to_string())? as id;
         if ns_window.is_null() {
             return Err("ns_window is null".into());
         }
 
-        // Tauri's underlying NSWindow subclass is `TaoWindow`. We can't message
-        // it with `setClass:` (NSObject only exposes `class`/`isKindOfClass:`).
-        // Swap the isa pointer directly via the objc runtime.
-        // Style mask `NSWindowStyleMaskNonactivatingPanel` (1<<7) is silently
-        // ignored unless the underlying class is NSPanel.
-        let panel_class: *const Class = class!(NSPanel);
-        if !panel_class.is_null() {
-            object_setClass(ns_window as *mut _, panel_class);
-        }
-
-        let current_mask: u64 = msg_send![ns_window, styleMask];
-        let nonactivating: u64 = 1 << 7;
-        let new_mask = current_mask | nonactivating;
-        let _: () = msg_send![ns_window, setStyleMask: new_mask];
-
-        // Float above normal windows; works while another app is frontmost.
-        let _: () = msg_send![ns_window, setFloatingPanel: objc::runtime::YES];
+        let floating_level: i64 = 3; // NSFloatingWindowLevel
+        let _: () = msg_send![ns_window, setLevel: floating_level];
         let _: () = msg_send![ns_window, setHidesOnDeactivate: objc::runtime::NO];
-        let _: () = msg_send![ns_window, setBecomesKeyOnlyIfNeeded: objc::runtime::NO];
     }
     let _ = window;
     Ok(())
@@ -9390,21 +10749,26 @@ fn convert_web_content_block(block: &serde_json::Value) -> Option<serde_json::Va
             }))
         }
         "tool_result" => {
-            let tool_use_id = obj.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("");
+            let tool_use_id = obj
+                .get("tool_use_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             // tool_result content can be array of {type, text} or string
-            let content = obj.get("content").cloned().unwrap_or(serde_json::Value::Null);
+            let content = obj
+                .get("content")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             // Flatten to string if it's an array of text blocks
             let content_str = match &content {
-                serde_json::Value::Array(arr) => {
-                    arr.iter()
-                        .filter_map(|item| {
-                            item.as_object()
-                                .and_then(|o| o.get("text"))
-                                .and_then(|v| v.as_str())
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                }
+                serde_json::Value::Array(arr) => arr
+                    .iter()
+                    .filter_map(|item| {
+                        item.as_object()
+                            .and_then(|o| o.get("text"))
+                            .and_then(|v| v.as_str())
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
                 serde_json::Value::String(s) => s.clone(),
                 _ => String::new(),
             };
@@ -9492,13 +10856,14 @@ async fn import_claude_web_data(path: String) -> Result<ImportResult, String> {
             if !conv_path.exists() {
                 return Err("conversations.json not found in directory".to_string());
             }
-            fs::read_to_string(&conv_path).map_err(|e| format!("Failed to read conversations.json: {}", e))?
+            fs::read_to_string(&conv_path)
+                .map_err(|e| format!("Failed to read conversations.json: {}", e))?
         } else if source_path.extension().map_or(false, |e| e == "zip") {
             // ZIP file - extract conversations.json
-            let file = fs::File::open(source_path)
-                .map_err(|e| format!("Failed to open zip: {}", e))?;
-            let mut archive = zip::ZipArchive::new(file)
-                .map_err(|e| format!("Failed to read zip: {}", e))?;
+            let file =
+                fs::File::open(source_path).map_err(|e| format!("Failed to open zip: {}", e))?;
+            let mut archive =
+                zip::ZipArchive::new(file).map_err(|e| format!("Failed to read zip: {}", e))?;
 
             // Find conversations.json (might be in a subdirectory)
             let mut found = None;
@@ -9579,7 +10944,10 @@ async fn import_claude_web_data(path: String) -> Result<ImportResult, String> {
             vec![]
         };
         imports.push(import_meta);
-        let _ = fs::write(&meta_path, serde_json::to_string_pretty(&imports).unwrap_or_default());
+        let _ = fs::write(
+            &meta_path,
+            serde_json::to_string_pretty(&imports).unwrap_or_default(),
+        );
 
         Ok(ImportResult {
             conversation_count: count,
@@ -9614,15 +10982,20 @@ struct WebSyncProgress {
 }
 
 #[tauri::command]
-async fn sync_claude_web_conversations(app_handle: tauri::AppHandle) -> Result<WebSyncResult, String> {
+async fn sync_claude_web_conversations(
+    app_handle: tauri::AppHandle,
+) -> Result<WebSyncResult, String> {
     eprintln!("[web-sync] step 1: reading & decrypting cookies");
     // 1. Read & decrypt cookies (blocking work)
     let cookies = tauri::async_runtime::spawn_blocking(claude_web_sync::read_claude_app_cookies)
         .await
         .map_err(|e| e.to_string())??;
     eprintln!("[web-sync] step 1 ok, got {} cookies", cookies.len());
-    let session_key = cookies.get("sessionKey")
-        .ok_or_else(|| "sessionKey cookie not found — log into Claude desktop app first".to_string())?
+    let session_key = cookies
+        .get("sessionKey")
+        .ok_or_else(|| {
+            "sessionKey cookie not found — log into Claude desktop app first".to_string()
+        })?
         .clone();
     eprintln!("[web-sync] sessionKey length = {}", session_key.len());
     let active_org = cookies.get("lastActiveOrg").cloned();
@@ -9641,18 +11014,29 @@ async fn sync_claude_web_conversations(app_handle: tauri::AppHandle) -> Result<W
     // URL-encoded JSON and unreliable to parse.
     eprintln!("[web-sync] step 3: GET /api/organizations");
     let org_id = {
-        let resp = client.get("https://claude.ai/api/organizations")
+        let resp = client
+            .get("https://claude.ai/api/organizations")
             .header(reqwest::header::COOKIE, &cookie_header)
-            .send().await.map_err(|e| format!("fetch orgs: {}", e))?;
+            .send()
+            .await
+            .map_err(|e| format!("fetch orgs: {}", e))?;
         let status = resp.status();
         eprintln!("[web-sync] orgs status: {}", status);
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(format!("fetch orgs: HTTP {} — {}", status, body.chars().take(200).collect::<String>()));
+            return Err(format!(
+                "fetch orgs: HTTP {} — {}",
+                status,
+                body.chars().take(200).collect::<String>()
+            ));
         }
-        let orgs: Vec<serde_json::Value> = resp.json().await.map_err(|e| format!("parse orgs: {}", e))?;
+        let orgs: Vec<serde_json::Value> = resp
+            .json()
+            .await
+            .map_err(|e| format!("parse orgs: {}", e))?;
         eprintln!("[web-sync] orgs count: {}", orgs.len());
-        let id = orgs.first()
+        let id = orgs
+            .first()
             .and_then(|o| o.get("uuid").and_then(|v| v.as_str()))
             .map(String::from)
             .ok_or_else(|| "no organizations found for this account".to_string())?;
@@ -9665,31 +11049,56 @@ async fn sync_claude_web_conversations(app_handle: tauri::AppHandle) -> Result<W
     eprintln!("[web-sync] org_id = {}", org_id);
 
     // 4. List conversations (lightweight metadata)
-    let list_url = format!("https://claude.ai/api/organizations/{}/chat_conversations", org_id);
+    let list_url = format!(
+        "https://claude.ai/api/organizations/{}/chat_conversations",
+        org_id
+    );
     eprintln!("[web-sync] step 4: GET {}", list_url);
-    let resp = client.get(&list_url)
+    let resp = client
+        .get(&list_url)
         .header(reqwest::header::COOKIE, &cookie_header)
-        .send().await.map_err(|e| format!("list conversations: {}", e))?;
+        .send()
+        .await
+        .map_err(|e| format!("list conversations: {}", e))?;
     let status = resp.status();
     eprintln!("[web-sync] list status: {}", status);
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("list conversations: HTTP {} — {}", status, body.chars().take(200).collect::<String>()));
+        return Err(format!(
+            "list conversations: HTTP {} — {}",
+            status,
+            body.chars().take(200).collect::<String>()
+        ));
     }
-    let conv_list: Vec<serde_json::Value> = resp.json().await
+    let conv_list: Vec<serde_json::Value> = resp
+        .json()
+        .await
         .map_err(|e| format!("parse conversation list: {}", e))?;
     eprintln!("[web-sync] got {} conversations from API", conv_list.len());
 
     // Cache web starred conversation uuids to disk so the frontend pin sync
     // can pick them up alongside Claude Code starredIds.
-    let web_starred: Vec<String> = conv_list.iter()
-        .filter(|c| c.get("is_starred").and_then(|v| v.as_bool()).unwrap_or(false))
+    let web_starred: Vec<String> = conv_list
+        .iter()
+        .filter(|c| {
+            c.get("is_starred")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        })
         .filter_map(|c| c.get("uuid").and_then(|v| v.as_str()).map(String::from))
         .collect();
     let cache_path = get_lovstudio_dir().join("claude-web-starred.json");
-    if let Some(parent) = cache_path.parent() { let _ = std::fs::create_dir_all(parent); }
-    let _ = std::fs::write(&cache_path, serde_json::to_string(&web_starred).unwrap_or_else(|_| "[]".into()));
-    eprintln!("[web-sync] cached {} web-starred conversations", web_starred.len());
+    if let Some(parent) = cache_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(
+        &cache_path,
+        serde_json::to_string(&web_starred).unwrap_or_else(|_| "[]".into()),
+    );
+    eprintln!(
+        "[web-sync] cached {} web-starred conversations",
+        web_starred.len()
+    );
 
     // 5. Prepare project dir
     let project_id = "-claude-ai".to_string();
@@ -9704,8 +11113,13 @@ async fn sync_claude_web_conversations(app_handle: tauri::AppHandle) -> Result<W
     let mut to_fetch: Vec<(String, String)> = Vec::new(); // (uuid, updated_at)
     let mut skipped = 0usize;
     for conv in &conv_list {
-        let Some(uuid) = conv.get("uuid").and_then(|v| v.as_str()) else { continue };
-        let updated_at = conv.get("updated_at").and_then(|v| v.as_str()).unwrap_or("");
+        let Some(uuid) = conv.get("uuid").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let updated_at = conv
+            .get("updated_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let session_file = project_dir.join(format!("{}.jsonl", uuid));
         if is_local_fresh_for_remote(&session_file, updated_at) {
             skipped += 1;
@@ -9714,10 +11128,21 @@ async fn sync_claude_web_conversations(app_handle: tauri::AppHandle) -> Result<W
         to_fetch.push((uuid.to_string(), updated_at.to_string()));
     }
 
-    let _ = app_handle.emit("web-sync-progress", WebSyncProgress {
-        total, processed: skipped, fetched: 0, skipped, failed: 0,
-    });
-    eprintln!("[web-sync] {} to fetch ({} skipped fresh)", to_fetch.len(), skipped);
+    let _ = app_handle.emit(
+        "web-sync-progress",
+        WebSyncProgress {
+            total,
+            processed: skipped,
+            fetched: 0,
+            skipped,
+            failed: 0,
+        },
+    );
+    eprintln!(
+        "[web-sync] {} to fetch ({} skipped fresh)",
+        to_fetch.len(),
+        skipped
+    );
 
     // 7. Fetch concurrently with bounded parallelism. claude.ai usually tolerates
     // a handful of in-flight detail requests; 6 keeps us well clear of rate limits
@@ -9750,29 +11175,41 @@ async fn sync_claude_web_conversations(app_handle: tauri::AppHandle) -> Result<W
                 org_id, uuid,
             );
             let result: Result<(), String> = (async {
-                let resp = client.get(&detail_url)
+                let resp = client
+                    .get(&detail_url)
                     .header(reqwest::header::COOKIE, cookie_header.as_str())
-                    .send().await.map_err(|e| format!("send: {}", e))?;
+                    .send()
+                    .await
+                    .map_err(|e| format!("send: {}", e))?;
                 if !resp.status().is_success() {
                     return Err(format!("HTTP {}", resp.status()));
                 }
-                let detail_value: serde_json::Value = resp.json().await
-                    .map_err(|e| format!("parse: {}", e))?;
+                let detail_value: serde_json::Value =
+                    resp.json().await.map_err(|e| format!("parse: {}", e))?;
 
                 // DEBUG: dump the very first response to a temp file so we can
                 // inspect the actual schema of the detail endpoint.
                 let dump_path = std::env::temp_dir().join("lovcode-web-detail-sample.json");
                 if !dump_path.exists() {
-                    let _ = std::fs::write(&dump_path, serde_json::to_string_pretty(&detail_value).unwrap_or_default());
+                    let _ = std::fs::write(
+                        &dump_path,
+                        serde_json::to_string_pretty(&detail_value).unwrap_or_default(),
+                    );
                     eprintln!("[web-sync] dumped sample to {}", dump_path.display());
                 }
 
-                let conv_struct: ClaudeWebConversation = serde_json::from_value(detail_value.clone())
-                    .map_err(|e| format!("struct: {}", e))?;
+                let conv_struct: ClaudeWebConversation =
+                    serde_json::from_value(detail_value.clone())
+                        .map_err(|e| format!("struct: {}", e))?;
                 if conv_struct.chat_messages.is_empty() {
-                    let top_keys: Vec<&str> = detail_value.as_object()
-                        .map(|m| m.keys().map(|s| s.as_str()).collect()).unwrap_or_default();
-                    eprintln!("[web-sync] {} has empty chat_messages; top keys = {:?}", uuid, top_keys);
+                    let top_keys: Vec<&str> = detail_value
+                        .as_object()
+                        .map(|m| m.keys().map(|s| s.as_str()).collect())
+                        .unwrap_or_default();
+                    eprintln!(
+                        "[web-sync] {} has empty chat_messages; top keys = {:?}",
+                        uuid, top_keys
+                    );
                     return Ok(()); // empty — counted as success no-op
                 }
                 let jsonl = convert_conversation_to_jsonl(&conv_struct);
@@ -9785,35 +11222,60 @@ async fn sync_claude_web_conversations(app_handle: tauri::AppHandle) -> Result<W
                     let _ = filetime::set_file_mtime(&session_file, ft);
                 }
                 Ok(())
-            }).await;
+            })
+            .await;
 
             match result {
-                Ok(()) => { fetched.fetch_add(1, Ordering::Relaxed); }
-                Err(e) => { eprintln!("[web-sync] {} failed: {}", uuid, e); failed.fetch_add(1, Ordering::Relaxed); }
+                Ok(()) => {
+                    fetched.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(e) => {
+                    eprintln!("[web-sync] {} failed: {}", uuid, e);
+                    failed.fetch_add(1, Ordering::Relaxed);
+                }
             }
             let p = processed.fetch_add(1, Ordering::Relaxed) + 1;
             if p % 5 == 0 || p == total {
-                let _ = app_handle.emit("web-sync-progress", WebSyncProgress {
-                    total,
-                    processed: p,
-                    fetched: fetched.load(Ordering::Relaxed),
-                    skipped,
-                    failed: failed.load(Ordering::Relaxed),
-                });
+                let _ = app_handle.emit(
+                    "web-sync-progress",
+                    WebSyncProgress {
+                        total,
+                        processed: p,
+                        fetched: fetched.load(Ordering::Relaxed),
+                        skipped,
+                        failed: failed.load(Ordering::Relaxed),
+                    },
+                );
             }
         }
-    })).buffer_unordered(CONCURRENCY);
+    }))
+    .buffer_unordered(CONCURRENCY);
 
     while stream.next().await.is_some() {}
 
     let fetched = fetched_counter.load(Ordering::Relaxed);
     let failed = failed_counter.load(Ordering::Relaxed);
-    eprintln!("[web-sync] done: fetched={} skipped={} failed={}", fetched, skipped, failed);
-    let _ = app_handle.emit("web-sync-progress", WebSyncProgress {
-        total, processed: total, fetched, skipped, failed,
-    });
+    eprintln!(
+        "[web-sync] done: fetched={} skipped={} failed={}",
+        fetched, skipped, failed
+    );
+    let _ = app_handle.emit(
+        "web-sync-progress",
+        WebSyncProgress {
+            total,
+            processed: total,
+            fetched,
+            skipped,
+            failed,
+        },
+    );
 
-    Ok(WebSyncResult { fetched, skipped_unchanged: skipped, failed, project_id })
+    Ok(WebSyncResult {
+        fetched,
+        skipped_unchanged: skipped,
+        failed,
+        project_id,
+    })
 }
 
 /// Debug command: fetch the raw API response for a single conversation and
@@ -9823,8 +11285,10 @@ async fn debug_probe_claude_web(uuid: String) -> Result<String, String> {
     let cookies = tauri::async_runtime::spawn_blocking(claude_web_sync::read_claude_app_cookies)
         .await
         .map_err(|e| e.to_string())??;
-    let session_key = cookies.get("sessionKey")
-        .ok_or_else(|| "no sessionKey".to_string())?.clone();
+    let session_key = cookies
+        .get("sessionKey")
+        .ok_or_else(|| "no sessionKey".to_string())?
+        .clone();
     let active_org = cookies.get("lastActiveOrg").cloned();
 
     let client = reqwest::Client::builder()
@@ -9847,9 +11311,17 @@ async fn debug_probe_claude_web(uuid: String) -> Result<String, String> {
     let mut report = String::new();
     for (i, url) in urls.iter().enumerate() {
         report.push_str(&format!("\n=== variant {}: {} ===\n", i, url));
-        let resp = match client.get(url).header(reqwest::header::COOKIE, &cookie_header).send().await {
+        let resp = match client
+            .get(url)
+            .header(reqwest::header::COOKIE, &cookie_header)
+            .send()
+            .await
+        {
             Ok(r) => r,
-            Err(e) => { report.push_str(&format!("send err: {}\n", e)); continue; }
+            Err(e) => {
+                report.push_str(&format!("send err: {}\n", e));
+                continue;
+            }
         };
         let status = resp.status();
         report.push_str(&format!("status: {}\n", status));
@@ -9874,14 +11346,22 @@ async fn debug_probe_claude_web(uuid: String) -> Result<String, String> {
                     }
                 }
                 // Also look for alternative field names
-                for alt in &["messages", "current_leaf_message", "chat_messages_leaf", "tree"] {
+                for alt in &[
+                    "messages",
+                    "current_leaf_message",
+                    "chat_messages_leaf",
+                    "tree",
+                ] {
                     if obj.contains_key(*alt) {
                         report.push_str(&format!("HAS field [{}]\n", alt));
                     }
                 }
             }
         } else {
-            report.push_str(&format!("non-JSON body head: {:?}\n", text.chars().take(200).collect::<String>()));
+            report.push_str(&format!(
+                "non-JSON body head: {:?}\n",
+                text.chars().take(200).collect::<String>()
+            ));
         }
     }
 
@@ -9890,9 +11370,15 @@ async fn debug_probe_claude_web(uuid: String) -> Result<String, String> {
 }
 
 fn is_local_fresh_for_remote(path: &std::path::Path, remote_updated_at: &str) -> bool {
-    let Ok(meta) = std::fs::metadata(path) else { return false };
-    let Ok(local_mtime) = meta.modified() else { return false };
-    let Ok(remote_dt) = chrono::DateTime::parse_from_rfc3339(remote_updated_at) else { return false };
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    let Ok(local_mtime) = meta.modified() else {
+        return false;
+    };
+    let Ok(remote_dt) = chrono::DateTime::parse_from_rfc3339(remote_updated_at) else {
+        return false;
+    };
     let local_secs = local_mtime
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -9943,7 +11429,10 @@ fn write_network_info_cache_file(fetched_at: std::time::SystemTime, info: &Netwo
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let payload = NetworkInfoCacheFile { fetched_at_unix: unix, info: info.clone() };
+    let payload = NetworkInfoCacheFile {
+        fetched_at_unix: unix,
+        info: info.clone(),
+    };
     if let Ok(bytes) = serde_json::to_vec(&payload) {
         let _ = std::fs::write(&path, bytes);
     }
@@ -9956,7 +11445,11 @@ async fn get_network_info() -> Result<NetworkInfo, String> {
             *guard = read_network_info_cache_file();
         }
         if let Some((fetched_at, info)) = guard.as_ref() {
-            if fetched_at.elapsed().map(|e| e < NETWORK_INFO_TTL).unwrap_or(false) {
+            if fetched_at
+                .elapsed()
+                .map(|e| e < NETWORK_INFO_TTL)
+                .unwrap_or(false)
+            {
                 return Ok(info.clone());
             }
         }
@@ -9995,10 +11488,20 @@ async fn get_network_info() -> Result<NetworkInfo, String> {
         (None, Some(co)) => co.to_string(),
         _ => "Unknown".to_string(),
     };
-    let ip = data.get("ip").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let ip = data
+        .get("ip")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let privacy = data.get("privacy");
-    let is_vpn = privacy.and_then(|p| p.get("vpn")).and_then(|v| v.as_bool()).unwrap_or(false);
-    let is_proxy_flag = privacy.and_then(|p| p.get("proxy")).and_then(|v| v.as_bool()).unwrap_or(false);
+    let is_vpn = privacy
+        .and_then(|p| p.get("vpn"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let is_proxy_flag = privacy
+        .and_then(|p| p.get("proxy"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let proxy_type = if is_vpn {
         Some("VPN".to_string())
     } else if is_proxy_flag {
@@ -10032,7 +11535,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
-            use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder, PredefinedMenuItem};
+            use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 
             // dev 模式：cargo 重启二进制后默认抢焦点。`[NSApp hide:]` 让自己
             // 在 active 之前先隐藏一次 —— macOS 会立刻把焦点交还给上一个
@@ -10060,19 +11563,26 @@ pub fn run() {
                 }
 
                 let (tx, rx) = channel();
-                let mut watcher: RecommendedWatcher = match notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
-                    if let Ok(event) = res {
-                        // Only trigger on create/modify/remove events
-                        if event.kind.is_create() || event.kind.is_modify() || event.kind.is_remove() {
-                            let _ = tx.send(());
+                let mut watcher: RecommendedWatcher =
+                    match notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
+                        if let Ok(event) = res {
+                            // Only trigger on create/modify/remove events
+                            if event.kind.is_create()
+                                || event.kind.is_modify()
+                                || event.kind.is_remove()
+                            {
+                                let _ = tx.send(());
+                            }
                         }
-                    }
-                }) {
-                    Ok(w) => w,
-                    Err(_) => return,
-                };
+                    }) {
+                        Ok(w) => w,
+                        Err(_) => return,
+                    };
 
-                if watcher.watch(&distill_dir, RecursiveMode::NonRecursive).is_err() {
+                if watcher
+                    .watch(&distill_dir, RecursiveMode::NonRecursive)
+                    .is_err()
+                {
                     return;
                 }
 
@@ -10098,18 +11608,25 @@ pub fn run() {
                 }
 
                 let (tx, rx) = channel();
-                let mut watcher: RecommendedWatcher = match notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
-                    if let Ok(event) = res {
-                        if event.kind.is_create() || event.kind.is_modify() || event.kind.is_remove() {
-                            let _ = tx.send(());
+                let mut watcher: RecommendedWatcher =
+                    match notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
+                        if let Ok(event) = res {
+                            if event.kind.is_create()
+                                || event.kind.is_modify()
+                                || event.kind.is_remove()
+                            {
+                                let _ = tx.send(());
+                            }
                         }
-                    }
-                }) {
-                    Ok(w) => w,
-                    Err(_) => return,
-                };
+                    }) {
+                        Ok(w) => w,
+                        Err(_) => return,
+                    };
 
-                if watcher.watch(&projects_dir, RecursiveMode::Recursive).is_err() {
+                if watcher
+                    .watch(&projects_dir, RecursiveMode::Recursive)
+                    .is_err()
+                {
                     return;
                 }
 
@@ -10127,7 +11644,11 @@ pub fn run() {
                 .build(app)?;
 
             let app_menu = SubmenuBuilder::new(app, "Lovcode")
-                .item(&PredefinedMenuItem::about(app, Some("About Lovcode"), None)?)
+                .item(&PredefinedMenuItem::about(
+                    app,
+                    Some("About Lovcode"),
+                    None,
+                )?)
                 .separator()
                 .item(&settings)
                 .separator()
@@ -10171,8 +11692,8 @@ pub fn run() {
             Ok(())
         })
         .on_menu_event(|app, event| {
-            use tauri::WebviewWindowBuilder;
             use tauri::WebviewUrl;
+            use tauri::WebviewWindowBuilder;
 
             match event.id().as_ref() {
                 "settings" => {
@@ -10197,23 +11718,27 @@ pub fn run() {
                         // Recreate main window
                         #[cfg(target_os = "macos")]
                         {
-                            if let Ok(window) = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
-                                .title("Lovcode")
-                                .inner_size(800.0, 600.0)
-                                .title_bar_style(tauri::TitleBarStyle::Overlay)
-                                .hidden_title(true)
-                                .traffic_light_position(tauri::Position::Logical(tauri::LogicalPosition::new(16.0, 28.0)))
-                                .build()
+                            if let Ok(window) =
+                                WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+                                    .title("Lovcode")
+                                    .inner_size(800.0, 600.0)
+                                    .title_bar_style(tauri::TitleBarStyle::Overlay)
+                                    .hidden_title(true)
+                                    .traffic_light_position(tauri::Position::Logical(
+                                        tauri::LogicalPosition::new(16.0, 28.0),
+                                    ))
+                                    .build()
                             {
                                 let _ = window.show();
                                 activate_and_focus_window(&window);
                             }
                         }
                         #[cfg(not(target_os = "macos"))]
-                        if let Ok(window) = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
-                            .title("Lovcode")
-                            .inner_size(800.0, 600.0)
-                            .build()
+                        if let Ok(window) =
+                            WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+                                .title("Lovcode")
+                                .inner_size(800.0, 600.0)
+                                .build()
                         {
                             let _ = window.show();
                             let _ = window.set_focus();
@@ -10231,6 +11756,7 @@ pub fn run() {
             get_sessions_usage,
             get_session_usage,
             list_all_sessions,
+            list_all_sessions_streamed,
             get_app_starred_session_ids,
             list_all_chats,
             get_session_messages,
@@ -10335,6 +11861,17 @@ pub fn run() {
             set_distill_watch_enabled,
             list_reference_sources,
             list_reference_docs,
+            add_reference_from_github,
+            refresh_reference_source,
+            remove_reference_source,
+            list_doc_sources,
+            list_doc_tree,
+            add_vault_source,
+            add_github_doc_source,
+            update_doc_source,
+            remove_doc_source,
+            reorder_doc_sources,
+            refresh_doc_source,
             get_claude_code_version_info,
             install_claude_code_version,
             cancel_claude_code_install,
@@ -10350,22 +11887,6 @@ pub fn run() {
             pty_scrollback,
             pty_purge_scrollback,
             pty_flush_scrollback,
-            // Workspace commands
-            workspace_load,
-            workspace_save,
-            workspace_add_project,
-            workspace_list_projects,
-            workspace_remove_project,
-            workspace_set_active_project,
-            workspace_create_feature,
-            workspace_rename_feature,
-            workspace_update_feature_status,
-            workspace_delete_feature,
-            workspace_set_active_feature,
-            workspace_add_panel,
-            workspace_remove_panel,
-            workspace_toggle_panel_shared,
-            workspace_get_pending_reviews,
             // Hook watcher commands
             hook_start_monitoring,
             hook_stop_monitoring,
@@ -10408,10 +11929,17 @@ pub fn run() {
         .run(|_app, _event| {
             #[cfg(target_os = "macos")]
             {
-                use tauri::{Manager, RunEvent, WebviewWindowBuilder, WebviewUrl};
+                use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 
-                if let RunEvent::Reopen { has_visible_windows, .. } = _event {
-                    println!("[Lovcode] Dock clicked! has_visible_windows: {}", has_visible_windows);
+                if let RunEvent::Reopen {
+                    has_visible_windows,
+                    ..
+                } = _event
+                {
+                    println!(
+                        "[Lovcode] Dock clicked! has_visible_windows: {}",
+                        has_visible_windows
+                    );
 
                     // 无论是否有"可见窗口"，都尝试打开主窗口
                     // 因为 float 窗口可能被计入 has_visible_windows
@@ -10426,7 +11954,9 @@ pub fn run() {
                             .inner_size(800.0, 600.0)
                             .title_bar_style(tauri::TitleBarStyle::Overlay)
                             .hidden_title(true)
-                            .traffic_light_position(tauri::Position::Logical(tauri::LogicalPosition::new(16.0, 28.0)))
+                            .traffic_light_position(tauri::Position::Logical(
+                                tauri::LogicalPosition::new(16.0, 28.0),
+                            ))
                             .build()
                         {
                             Ok(window) => {

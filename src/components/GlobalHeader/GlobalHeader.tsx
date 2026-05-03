@@ -1,15 +1,13 @@
-import { type ReactNode, useEffect } from "react";
+import { type ReactNode } from "react";
 import { useAtom } from "jotai";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   PersonIcon, ChevronLeftIcon, ChevronRightIcon,
-  RocketIcon, CounterClockwiseClockIcon, BookmarkIcon, LayersIcon,
-  CalendarIcon, CubeIcon,
+  CounterClockwiseClockIcon, BookmarkIcon, LayersIcon, CalendarIcon,
 } from "@radix-ui/react-icons";
 import { Avatar, AvatarImage, AvatarFallback } from "../ui/avatar";
 import { Popover, PopoverTrigger, PopoverContent } from "../ui/popover";
-import { sidebarCollapsedAtom, profileAtom, workspaceDataAtom, primaryFeatureAtom, featureTabsLayoutAtom } from "@/store";
-import { GlobalFeatureTabs } from "./GlobalFeatureTabs";
+import { profileAtom } from "@/store";
 import type { FeatureType } from "@/types";
 
 interface GlobalHeaderProps {
@@ -23,6 +21,35 @@ interface GlobalHeaderProps {
   onShowSettings: () => void;
 }
 
+// Top-nav features. Active state is derived from currentFeature so the
+// highlight syncs with the URL (back/forward, sidebar links, deep links).
+const MAIN_NAV: { feature: FeatureType; label: string; icon: ReactNode; matches: (f: FeatureType | null) => boolean }[] = [
+  {
+    feature: "chat",
+    label: "History",
+    icon: <CounterClockwiseClockIcon className="w-4 h-4" />,
+    matches: (f) => f === "chat",
+  },
+  {
+    feature: "features",
+    label: "Configuration",
+    icon: <LayersIcon className="w-4 h-4" />,
+    matches: (f) => f === "features",
+  },
+  {
+    feature: "kb-distill",
+    label: "Knowledge",
+    icon: <BookmarkIcon className="w-4 h-4" />,
+    matches: (f) => !!f && f.startsWith("kb-"),
+  },
+  {
+    feature: "events",
+    label: "Events",
+    icon: <CalendarIcon className="w-4 h-4" />,
+    matches: (f) => f === "events",
+  },
+];
+
 export function GlobalHeader({
   currentFeature,
   canGoBack,
@@ -33,116 +60,12 @@ export function GlobalHeader({
   onShowProfileDialog,
   onShowSettings,
 }: GlobalHeaderProps) {
-  const [sidebarCollapsed] = useAtom(sidebarCollapsedAtom);
   const [profile] = useAtom(profileAtom);
-  const [workspace] = useAtom(workspaceDataAtom);
-  const [primaryFeature, setPrimaryFeature] = useAtom(primaryFeatureAtom);
-  const [featureTabsLayout] = useAtom(featureTabsLayoutAtom);
 
-  // Show horizontal feature tabs when workspace data is available AND layout is horizontal
-  const showFeatureTabs = !!workspace && featureTabsLayout === "horizontal";
-
-  // Main nav features - use primaryFeature for active state (not affected by profile menu clicks)
-  const mainNavFeatures = ["workspace", "chat", "kb-distill", "kb-reference", "events", "basic-maas"] as const;
-  const isMainNavFeature = (f: string | null) => f && (mainNavFeatures.includes(f as typeof mainNavFeatures[number]) || f.startsWith("kb-"));
-
-  // Handle main nav click - updates primaryFeature
-  const handleMainNavClick = (feature: FeatureType) => {
-    setPrimaryFeature(feature);
-    onFeatureClick(feature);
-  };
-
-  // Sync primaryFeature when navigating via other means (sidebar, back/forward)
-  useEffect(() => {
-    if (currentFeature === null) {
-      setPrimaryFeature(null);
-    } else if (isMainNavFeature(currentFeature)) {
-      setPrimaryFeature(currentFeature);
-    }
-  }, [currentFeature]);
-
-  if (sidebarCollapsed) {
-    // Collapsed layout - full nav in header
-    return (
-      <div data-tauri-drag-region className="h-[52px] shrink-0 flex items-center border-b border-border bg-card">
-        {/* Left: back/forward */}
-        <div className="flex items-center gap-0.5 pl-[80px]">
-          <button
-            onClick={onGoBack}
-            disabled={!canGoBack}
-            className="p-1.5 rounded-md text-muted-foreground hover:text-ink hover:bg-card-alt disabled:opacity-30 disabled:pointer-events-none"
-            title="Go back"
-          >
-            <ChevronLeftIcon className="w-5 h-5" />
-          </button>
-          <button
-            onClick={onGoForward}
-            disabled={!canGoForward}
-            className="p-1.5 rounded-md text-muted-foreground hover:text-ink hover:bg-card-alt disabled:opacity-30 disabled:pointer-events-none"
-            title="Go forward"
-          >
-            <ChevronRightIcon className="w-5 h-5" />
-          </button>
-        </div>
-        {/* Center: menu group */}
-        <div className="flex-1 flex items-center justify-center gap-0.5" data-tauri-drag-region>
-          <NavButton
-            isActive={primaryFeature === "chat"}
-            onClick={() => handleMainNavClick("chat")}
-            icon={<CounterClockwiseClockIcon className="w-4 h-4" />}
-            label="History"
-          />
-          <NavButton
-            isActive={primaryFeature === "workspace"}
-            onClick={() => handleMainNavClick("workspace")}
-            icon={<RocketIcon className="w-4 h-4" />}
-            label="Dashboard"
-          />
-          <NavButton
-            isActive={primaryFeature === "features"}
-            onClick={() => handleMainNavClick("features")}
-            icon={<LayersIcon className="w-4 h-4" />}
-            label="Configuration"
-          />
-          <NavButton
-            isActive={primaryFeature === "basic-maas"}
-            onClick={() => handleMainNavClick("basic-maas")}
-            icon={<CubeIcon className="w-4 h-4" />}
-            label="MaaS"
-          />
-          <NavButton
-            isActive={primaryFeature?.startsWith("kb-") ?? false}
-            onClick={() => handleMainNavClick("kb-distill")}
-            icon={<BookmarkIcon className="w-4 h-4" />}
-            label="Knowledge"
-          />
-          <NavButton
-            isActive={primaryFeature === "events"}
-            onClick={() => handleMainNavClick("events")}
-            icon={<CalendarIcon className="w-4 h-4" />}
-            label="Events"
-          />
-          {showFeatureTabs && (
-            <>
-              <div className="h-4 border-l border-border mx-2" />
-              <GlobalFeatureTabs />
-            </>
-          )}
-        </div>
-        {/* Right: profile */}
-        <ProfileMenu
-          profile={profile}
-          onShowProfileDialog={onShowProfileDialog}
-          onShowSettings={onShowSettings}
-        />
-      </div>
-    );
-  }
-
-  // Expanded layout - minimal header (nav is in sidebar)
   return (
-    <div data-tauri-drag-region className="h-[52px] shrink-0 flex items-center justify-between border-b border-border bg-card">
-      <div className="flex items-center gap-0.5 pl-3">
+    <div data-tauri-drag-region className="h-[52px] shrink-0 flex items-center border-b border-border bg-card">
+      {/* Left: back/forward (offset for traffic-light buttons on macOS) */}
+      <div className="flex items-center gap-0.5 pl-[80px]">
         <button
           onClick={onGoBack}
           disabled={!canGoBack}
@@ -159,14 +82,20 @@ export function GlobalHeader({
         >
           <ChevronRightIcon className="w-5 h-5" />
         </button>
-        {/* Feature Tabs - shown when in workspace view */}
-        {showFeatureTabs && (
-          <>
-            <div className="h-4 border-l border-border mx-2" />
-            <GlobalFeatureTabs />
-          </>
-        )}
       </div>
+      {/* Center: nav */}
+      <div className="flex-1 flex items-center justify-center gap-0.5" data-tauri-drag-region>
+        {MAIN_NAV.map((item) => (
+          <NavButton
+            key={item.feature}
+            isActive={item.matches(currentFeature)}
+            onClick={() => onFeatureClick(item.feature)}
+            icon={item.icon}
+            label={item.label}
+          />
+        ))}
+      </div>
+      {/* Right: profile */}
       <ProfileMenu
         profile={profile}
         onShowProfileDialog={onShowProfileDialog}
@@ -176,7 +105,6 @@ export function GlobalHeader({
   );
 }
 
-// Extracted profile menu component
 function ProfileMenu({
   profile,
   onShowProfileDialog,
@@ -221,7 +149,6 @@ function ProfileMenu({
   );
 }
 
-// Animated nav button with expanding label
 function NavButton({
   isActive,
   onClick,

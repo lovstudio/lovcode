@@ -7,17 +7,17 @@
  * - Fallback to built-in status bar if no script configured
  */
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { useAtom, useAtomValue } from "jotai";
-import { workspaceDataAtom } from "../store";
+import { useAtomValue } from "jotai";
 import { invoke } from "@tauri-apps/api/core";
 import {
   FolderIcon,
-  GitBranchIcon,
   CodeIcon,
   GlobeIcon,
   ClockIcon,
   SettingsIcon,
 } from "lucide-react";
+import { useInvokeQuery } from "../hooks";
+import type { Project } from "../types";
 import { version as VERSION } from "../../package.json";
 import { updateStateAtom, type UpdateStage } from "./UpdateChecker";
 
@@ -42,7 +42,6 @@ interface StatusBarContext {
   app_name: string;
   version: string;
   projects_count: number;
-  features_count: number;
   today_lines_added: number;
   today_lines_deleted: number;
   timestamp: string;
@@ -144,7 +143,9 @@ interface StatusBarProps {
 }
 
 export function StatusBar({ onOpenSettings }: StatusBarProps) {
-  const [workspace] = useAtom(workspaceDataAtom);
+  // Same data as ProjectList's ["projects"] — share the cache key so it's
+  // fetched once instead of duplicating a multi-second invoke on cold start.
+  const { data: ccProjects = [] } = useInvokeQuery<Project[]>(["projects"], "list_projects");
   const [time, setTime] = useState(new Date());
   const [networkInfo, setNetworkInfo] = useState<NetworkInfo | null>(null);
   const [todayStats, setTodayStats] = useState<TodayStats>({ lines_added: 0, lines_deleted: 0 });
@@ -176,26 +177,31 @@ export function StatusBar({ onOpenSettings }: StatusBarProps) {
     return () => clearInterval(timer);
   }, []);
 
-  // Calculate stats from workspace
-  const projectCount = workspace?.projects?.length ?? 0;
-  const featCount = workspace?.projects?.reduce(
-    (sum, p) => sum + (p.features?.length ?? 0),
-    0
-  ) ?? 0;
+  const projectCount = ccProjects.length;
 
   // Fetch today's coding stats
   useEffect(() => {
+    let cancelled = false;
+
     async function fetchTodayStats() {
       try {
         const stats = await invoke<TodayStats>("get_today_coding_stats");
+        if (cancelled) return;
         setTodayStats(stats);
       } catch {
         // Command might not exist yet
       }
     }
-    fetchTodayStats();
-    const timer = setInterval(fetchTodayStats, 30000);
-    return () => clearInterval(timer);
+
+    // This scans Git repos derived from ~/.claude/projects. Keep it off the
+    // reload critical path; the status bar can update shortly after paint.
+    const initialTimer = window.setTimeout(fetchTodayStats, 1500);
+    const intervalTimer = window.setInterval(fetchTodayStats, 30000);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(initialTimer);
+      window.clearInterval(intervalTimer);
+    };
   }, []);
 
   // Build context for script
@@ -203,12 +209,11 @@ export function StatusBar({ onOpenSettings }: StatusBarProps) {
     app_name: "Lovcode",
     version: VERSION,
     projects_count: projectCount,
-    features_count: featCount,
     today_lines_added: todayStats.lines_added,
     today_lines_deleted: todayStats.lines_deleted,
     timestamp: time.toISOString(),
     home_dir: homeDir,
-  }), [projectCount, featCount, todayStats, time, homeDir]);
+  }), [projectCount, todayStats, time, homeDir]);
 
   // Execute script if enabled
   useEffect(() => {
@@ -329,10 +334,6 @@ export function StatusBar({ onOpenSettings }: StatusBarProps) {
           <div className="flex items-center gap-1" title="Projects">
             <FolderIcon className="w-3 h-3" />
             <span>{projectCount}</span>
-          </div>
-          <div className="flex items-center gap-1" title="Features">
-            <GitBranchIcon className="w-3 h-3" />
-            <span>{featCount}</span>
           </div>
           {(todayStats.lines_added > 0 || todayStats.lines_deleted > 0) && (
             <div className="flex items-center gap-1" title="Today's changes">

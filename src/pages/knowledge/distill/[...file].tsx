@@ -34,8 +34,9 @@ export default function DistillDetailPage() {
 
   const handleFeatureClick = (feature: FeatureType) => {
     if (feature === "kb-distill") navigate("/knowledge/distill");
-    else if (feature === "kb-reference") navigate("/knowledge/reference");
   };
+  const handleSourceClick = (sourceId: string) =>
+    navigate(`/knowledge/source/${encodeURIComponent(sourceId)}`);
 
   const handleNavigateSession = (projectId: string, projectPath: string, sessionId: string, summary: string | null) => {
     const params = new URLSearchParams();
@@ -48,7 +49,7 @@ export default function DistillDetailPage() {
 
   if (loading) {
     return (
-      <KnowledgeLayout currentFeature="kb-distill" onFeatureClick={handleFeatureClick}>
+      <KnowledgeLayout currentFeature="kb-distill" onFeatureClick={handleFeatureClick} onSourceClick={handleSourceClick}>
         <LoadingState message="Loading document..." />
       </KnowledgeLayout>
     );
@@ -57,7 +58,7 @@ export default function DistillDetailPage() {
   if (!document) return null;
 
   return (
-    <KnowledgeLayout currentFeature="kb-distill" onFeatureClick={handleFeatureClick}>
+    <KnowledgeLayout currentFeature="kb-distill" onFeatureClick={handleFeatureClick} onSourceClick={handleSourceClick}>
       <DistillDetailView
         document={document}
         onBack={() => navigate("/knowledge/distill")}

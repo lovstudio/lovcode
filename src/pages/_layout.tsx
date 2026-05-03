@@ -6,8 +6,8 @@
  */
 import { useState, useEffect, useCallback } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { PersonIcon, ChevronRightIcon } from "@radix-ui/react-icons";
-import { GlobalHeader, VerticalFeatureTabs } from "../components/GlobalHeader";
+import { PersonIcon } from "@radix-ui/react-icons";
+import { GlobalHeader } from "../components/GlobalHeader";
 import { GlobalChatSearch } from "../components/GlobalChatSearch";
 import { StatusBar } from "../components/StatusBar";
 import { setAutoCopyOnSelect, getAutoCopyOnSelect } from "../components/Terminal";
@@ -19,8 +19,9 @@ import { Label } from "../components/ui/label";
 import { Button } from "../components/ui/button";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { useQueryClient } from "../hooks";
 import { useAtom } from "jotai";
-import { shortenPathsAtom, profileAtom, featureTabsLayoutAtom, workspaceDataAtom, dashboardSessionsVisibleAtom, globalChatSearchHotkeyAtom } from "../store";
+import { shortenPathsAtom, profileAtom, globalChatSearchHotkeyAtom } from "../store";
 import { AppConfigContext, useAppConfig, type AppConfig } from "../context";
 import type { FeatureType, UserProfile } from "../types";
 
@@ -34,9 +35,8 @@ function getFeatureFromPath(pathname: string): FeatureType | null {
 
   const featureMap: Record<string, FeatureType> = {
     "": null as unknown as FeatureType,
-    "workspace": "workspace",
     "features": "features",
-    "chat": "chat",
+    "history": "chat",
     "skills": "skills",
     "commands": "commands",
     "mcp": "mcp",
@@ -54,7 +54,6 @@ function getFeatureFromPath(pathname: string): FeatureType | null {
   if (path.startsWith("settings/")) {
     const sub = path.split("/")[1];
     if (sub === "env") return "basic-env";
-    if (sub === "llm") return "basic-llm";
     if (sub === "maas") return "basic-maas";
     if (sub === "version") return "basic-version";
     if (sub === "context") return "basic-context";
@@ -65,7 +64,7 @@ function getFeatureFromPath(pathname: string): FeatureType | null {
   if (path.startsWith("knowledge/")) {
     const sub = path.split("/")[1];
     if (sub === "distill") return "kb-distill";
-    if (sub === "reference") return "kb-reference";
+    // sub === "source" → dynamic source, no fixed FeatureType
   }
 
   return featureMap[segment] ?? null;
@@ -78,26 +77,35 @@ function getFeatureFromPath(pathname: string): FeatureType | null {
 export default function RootLayout() {
   const location = useLocation();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
   // Derive current feature from URL
   const currentFeature = getFeatureFromPath(location.pathname);
 
   // App state (non-routing)
-  const [featureTabsLayout] = useAtom(featureTabsLayoutAtom);
-  const [workspace] = useAtom(workspaceDataAtom);
-  const [dashboardSidebarVisible, setDashboardSidebarVisible] = useAtom(dashboardSessionsVisibleAtom);
   const [homeDir, setHomeDir] = useState("");
   const [shortenPaths, setShortenPaths] = useAtom(shortenPathsAtom);
   const [showSettings, setShowSettings] = useState(false);
   const [profile, setProfile] = useAtom(profileAtom);
   const [showProfileDialog, setShowProfileDialog] = useState(false);
 
-  // Check if currently in workspace (Dashboard) view
-  const isInWorkspace = location.pathname === "/workspace";
-
   useEffect(() => {
     invoke<string>("get_home_dir").then(setHomeDir).catch(() => {});
   }, []);
+
+  // Splash dismissal:
+  //   - On /history (and "/" which redirects to /history via HomePage),
+  //     ProjectList controls the splash — wait until the session list is
+  //     actually ready, no jarring "empty shell" gap.
+  //   - On every other route, RootLayout dismisses immediately — those
+  //     pages don't have a multi-second initial query.
+  // The lastPath resume target may be anything, so we also skip dispatch
+  // on "/" because HomePage will redirect within a microtask.
+  useEffect(() => {
+    const p = location.pathname;
+    if (p === "/" || p.startsWith("/history")) return;
+    window.dispatchEvent(new Event("app:ready"));
+  }, [location.pathname]);
 
   useEffect(() => {
     const path = location.pathname + location.search;
@@ -111,6 +119,18 @@ export default function RootLayout() {
     const unlisten = listen("menu-settings", () => setShowSettings(true));
     return () => { unlisten.then(fn => fn()); };
   }, []);
+
+  // Backend (notify) watches ~/.claude/projects/ and emits "sessions-changed"
+  // when Claude Code writes / appends a jsonl. Invalidate so the next read
+  // picks up the change. The sessions cache (B) makes this re-read cheap —
+  // only the changed file's mtime is bumped, everything else hits cache.
+  useEffect(() => {
+    const unlisten = listen("sessions-changed", () => {
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      queryClient.invalidateQueries({ queryKey: ["projects"] });
+    });
+    return () => { unlisten.then(fn => fn()); };
+  }, [queryClient]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -136,9 +156,8 @@ export default function RootLayout() {
   // URL-based navigation
   const handleFeatureClick = (feature: FeatureType) => {
     const routes: Record<FeatureType, string> = {
-      "chat": "/chat",
+      "chat": "/history",
       "basic-env": "/settings/env",
-      "basic-llm": "/settings/llm",
       "basic-maas": "/settings/maas",
       "basic-version": "/settings/version",
       "basic-context": "/settings/context",
@@ -151,8 +170,6 @@ export default function RootLayout() {
       "output-styles": "/output-styles",
       "statusline": "/statusline",
       "kb-distill": "/knowledge/distill",
-      "kb-reference": "/knowledge/reference",
-      "workspace": "/workspace",
       "features": "/features",
       "marketplace": "/marketplace",
       "extensions": "/extensions",
@@ -178,17 +195,6 @@ export default function RootLayout() {
           onShowSettings={() => setShowSettings(true)}
         />
         <div className="flex-1 flex overflow-hidden">
-          {featureTabsLayout === "vertical" && workspace && isInWorkspace && dashboardSidebarVisible && <VerticalFeatureTabs />}
-          {/* Show expand button when sidebar is hidden in workspace */}
-          {featureTabsLayout === "vertical" && isInWorkspace && !dashboardSidebarVisible && (
-            <button
-              onClick={() => setDashboardSidebarVisible(true)}
-              className="shrink-0 w-6 flex items-center justify-center border-r border-border bg-card hover:bg-muted transition-colors"
-              title="Show sidebar"
-            >
-              <ChevronRightIcon className="w-4 h-4 text-muted-foreground" />
-            </button>
-          )}
           <main className="flex-1 overflow-auto">
             <Outlet />
           </main>
@@ -222,7 +228,6 @@ const settingsSections: { id: SettingsSection; label: string }[] = [
 function AppSettingsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { shortenPaths, setShortenPaths } = useAppConfig();
   const [autoCopy, setAutoCopy] = useState(getAutoCopyOnSelect);
-  const [featureTabsLayout, setFeatureTabsLayout] = useAtom(featureTabsLayoutAtom);
   const [globalChatSearchHotkey, setGlobalChatSearchHotkey] = useAtom(globalChatSearchHotkeyAtom);
   const [statusBarEnabled, setStatusBarEnabled] = useState(false);
   const [statusBarScript, setStatusBarScript] = useState("~/.lovstudio/lovcode/statusbar/default.sh");
@@ -314,30 +319,6 @@ function AppSettingsDialog({ open, onClose }: { open: boolean; onClose: () => vo
                     <p className="text-xs text-muted-foreground">Open chat search even when the app is in the background</p>
                   </div>
                   <Switch checked={globalChatSearchHotkey} onCheckedChange={setGlobalChatSearchHotkey} />
-                </div>
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm font-medium text-ink">Project tabs layout</p>
-                    <p className="text-xs text-muted-foreground">Position of project/feature tabs</p>
-                  </div>
-                  <div className="flex gap-0.5 p-0.5 bg-muted rounded-lg">
-                    <button
-                      onClick={() => setFeatureTabsLayout("horizontal")}
-                      className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
-                        featureTabsLayout === "horizontal" ? "bg-background text-ink shadow-sm" : "text-muted-foreground hover:text-ink"
-                      }`}
-                    >
-                      Horizontal
-                    </button>
-                    <button
-                      onClick={() => setFeatureTabsLayout("vertical")}
-                      className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
-                        featureTabsLayout === "vertical" ? "bg-background text-ink shadow-sm" : "text-muted-foreground hover:text-ink"
-                      }`}
-                    >
-                      Vertical
-                    </button>
-                  </div>
                 </div>
               </div>
             )}

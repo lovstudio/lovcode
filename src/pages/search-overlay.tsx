@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { emit, listen } from "@tauri-apps/api/event";
+import { emitTo, listen } from "@tauri-apps/api/event";
 import { MagnifyingGlassIcon } from "@radix-ui/react-icons";
 import type { Session } from "../types";
 import { formatDate } from "../views/Chat/utils";
@@ -110,7 +110,7 @@ export default function SearchOverlay() {
   };
 
   const onSelect = (s: Session) => {
-    emit("open-chat", {
+    emitTo("main", "open-chat", {
       projectId: s.project_id,
       projectPath: s.project_path || "",
       sessionId: s.id,
