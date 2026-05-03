@@ -103,7 +103,7 @@ const composerPtyHeightAtom = atomWithStorage<number>(
   PTY_HEIGHT_DEFAULT,
 );
 
-export function ProjectList({ onSelectProject, onSelectSession }: ProjectListProps) {
+export function ProjectList({ onSelectProject, onSelectSession: _onSelectSession }: ProjectListProps) {
   const toReadable = useReadableText();
   const queryClient = useQueryClient();
 
