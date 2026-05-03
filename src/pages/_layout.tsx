@@ -8,6 +8,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { PersonIcon, ChevronRightIcon } from "@radix-ui/react-icons";
 import { GlobalHeader, VerticalFeatureTabs } from "../components/GlobalHeader";
+import { GlobalChatSearch } from "../components/GlobalChatSearch";
 import { StatusBar } from "../components/StatusBar";
 import { setAutoCopyOnSelect, getAutoCopyOnSelect } from "../components/Terminal";
 import { Switch } from "../components/ui/switch";
@@ -19,7 +20,7 @@ import { Button } from "../components/ui/button";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useAtom } from "jotai";
-import { shortenPathsAtom, profileAtom, featureTabsLayoutAtom, workspaceDataAtom, dashboardSessionsVisibleAtom } from "../store";
+import { shortenPathsAtom, profileAtom, featureTabsLayoutAtom, workspaceDataAtom, dashboardSessionsVisibleAtom, globalChatSearchHotkeyAtom } from "../store";
 import { AppConfigContext, useAppConfig, type AppConfig } from "../context";
 import type { FeatureType, UserProfile } from "../types";
 
@@ -195,6 +196,7 @@ export default function RootLayout() {
       </div>
       <AppSettingsDialog open={showSettings} onClose={() => setShowSettings(false)} />
       <ProfileDialog open={showProfileDialog} onClose={() => setShowProfileDialog(false)} profile={profile} onSave={setProfile} />
+      <GlobalChatSearch />
     </AppConfigContext.Provider>
   );
 }
@@ -220,6 +222,7 @@ function AppSettingsDialog({ open, onClose }: { open: boolean; onClose: () => vo
   const { shortenPaths, setShortenPaths } = useAppConfig();
   const [autoCopy, setAutoCopy] = useState(getAutoCopyOnSelect);
   const [featureTabsLayout, setFeatureTabsLayout] = useAtom(featureTabsLayoutAtom);
+  const [globalChatSearchHotkey, setGlobalChatSearchHotkey] = useAtom(globalChatSearchHotkeyAtom);
   const [statusBarEnabled, setStatusBarEnabled] = useState(false);
   const [statusBarScript, setStatusBarScript] = useState("~/.lovstudio/lovcode/statusbar/default.sh");
   const [activeSection, setActiveSection] = useState<SettingsSection>("display");
@@ -303,6 +306,13 @@ function AppSettingsDialog({ open, onClose }: { open: boolean; onClose: () => vo
                     <p className="text-xs text-muted-foreground">Replace home directory with ~</p>
                   </div>
                   <Switch checked={shortenPaths} onCheckedChange={setShortenPaths} />
+                </div>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-ink">Global ⌘K hotkey</p>
+                    <p className="text-xs text-muted-foreground">Open chat search even when the app is in the background</p>
+                  </div>
+                  <Switch checked={globalChatSearchHotkey} onCheckedChange={setGlobalChatSearchHotkey} />
                 </div>
                 <div className="flex items-center justify-between">
                   <div>

@@ -2,8 +2,8 @@ import { useState, useMemo, useEffect, useRef, useLayoutEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ChevronDownIcon, ChevronRightIcon, DotsHorizontalIcon, ListBulletIcon, GroupIcon, MagnifyingGlassIcon, Cross2Icon, DesktopIcon, RocketIcon, CheckIcon } from "@radix-ui/react-icons";
-import { Copy, Upload, ChevronUp, ChevronDown, Pin, RefreshCw, CornerDownLeft, AlertTriangle } from "lucide-react";
+import { ChevronDownIcon, ChevronRightIcon, DotsHorizontalIcon, ListBulletIcon, MagnifyingGlassIcon, Cross2Icon, DesktopIcon, RocketIcon, CheckIcon } from "@radix-ui/react-icons";
+import { Copy, Upload, ChevronUp, ChevronDown, Pin, RefreshCw, CornerDownLeft, AlertTriangle, Folder, Pencil, ExternalLink, SlidersHorizontal } from "lucide-react";
 import { TerminalPane, disposeTerminal } from "../../components/Terminal";
 import { TERMINAL_OPTIONS, type TerminalOption } from "../../components/ui/new-terminal-button";
 import { useAtom } from "jotai";
@@ -20,9 +20,13 @@ import {
   pinnedCollapsedAtom,
   recentCollapsedAtom,
   importCollapsedAtom,
+  allProjectsGroupedAtom,
+  allProjectsDataSourceAtom,
+  allProjectsCollapsedGroupsAtom,
+  type ProjectListDataSource,
 } from "../../store";
 import { useAppConfig } from "../../context";
-import { useReadableText, formatTokens, inferModelInfo } from "./utils";
+import { useReadableText, formatTokens, inferModelInfo, resolveSessionLabel, titleSourceBadge } from "./utils";
 import { useInvokeQuery, useQueryClient } from "../../hooks";
 import { CollapsibleContent } from "./CollapsibleContent";
 import { ContentBlockRenderer } from "./ContentBlockRenderer";
@@ -45,7 +49,9 @@ import {
 import {
   SessionDropdownMenuItems,
 } from "../../components/shared/SessionMenuItems";
+import { ProjectPathLabel } from "../../components/shared/ProjectPathLabel";
 import { ExportDialog } from "./ExportDialog";
+import { chatSearchOpenAtom } from "../../components/GlobalChatSearch";
 import type { Project, Session, ChatMessage, Message } from "../../types";
 
 interface ProjectListProps {
@@ -76,6 +82,27 @@ const recentModelsAtom = atomWithStorage<RecentModelEntry[]>(
   [],
 );
 
+/** MRU of cwds the user has launched a new session from. Used to populate the
+ *  new-session project picker. Separate from the Project list (which is derived
+ *  from on-disk claude/codex history) so users can seed it with folders that
+ *  have no prior history. */
+interface RecentProjectEntry {
+  path: string;
+  at: number;
+}
+const MAX_RECENT_PROJECTS = 8;
+const recentProjectsAtom = atomWithStorage<RecentProjectEntry[]>(
+  "lovcode:recentProjects",
+  [],
+);
+
+const PTY_HEIGHT_DEFAULT = 288;
+const PTY_HEIGHT_MIN = 160;
+const composerPtyHeightAtom = atomWithStorage<number>(
+  "lovcode:composerPtyHeight",
+  PTY_HEIGHT_DEFAULT,
+);
+
 export function ProjectList({ onSelectProject, onSelectSession }: ProjectListProps) {
   const toReadable = useReadableText();
   const queryClient = useQueryClient();
@@ -88,8 +115,8 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
   //   top: "all" | "local" | "app"
   //   sub (only when top==="app"): "code" | "web" | "cowork"
   // Flattened into one DataSource value so filters key off a single variable.
-  type DataSource = "all" | "local" | "app-code" | "app-web" | "app-cowork";
-  const [dataSource, setDataSource] = useState<DataSource>("all");
+  type DataSource = ProjectListDataSource;
+  const [dataSource, setDataSource] = useAtom(allProjectsDataSourceAtom);
   const topTab: "all" | "local" | "app" =
     dataSource === "all" ? "all" : dataSource === "local" ? "local" : "app";
 
@@ -100,7 +127,11 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
   const [pinnedCollapsed, setPinnedCollapsed] = useAtom(pinnedCollapsedAtom);
   const [recentCollapsed, setRecentCollapsed] = useAtom(recentCollapsedAtom);
   const [importCollapsed, setImportCollapsed] = useAtom(importCollapsedAtom);
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string> | null>(null);
+  const [collapsedGroupsArr, setCollapsedGroupsArr] = useAtom(allProjectsCollapsedGroupsAtom);
+  const collapsedGroups = useMemo<Set<string> | null>(
+    () => (collapsedGroupsArr === null ? null : new Set(collapsedGroupsArr)),
+    [collapsedGroupsArr],
+  );
   const [selectedSessionRaw, setSelectedSessionRaw] = useState<Session | null>(null);
   // Always re-derive the selected session from the live `allSessions` array so that
   // when cwd repair / migration moves a session to a new project slug, the right panel
@@ -110,48 +141,40 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
     return allSessions.find((s) => s.id === selectedSessionRaw.id) ?? selectedSessionRaw;
   }, [selectedSessionRaw, allSessions]);
   const setSelectedSession: typeof setSelectedSessionRaw = setSelectedSessionRaw;
-  const [grouped, setGrouped] = useState(true);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [searchOpen, setSearchOpen] = useState(false);
-  const searchInputRef = useRef<HTMLInputElement | null>(null);
-  const [searchResults, setSearchResults] = useState<Session[] | null>(null);
-  const [searching, setSearching] = useState(false);
-  const [indexReady, setIndexReady] = useState(false);
-  const detailScrollRef = useRef<HTMLDivElement>(null);
-
+  const [recentProjects, setRecentProjects] = useAtom(recentProjectsAtom);
+  const [activeCwd, setActiveCwd] = useState<string | null>(null);
+  // Seed activeCwd once we know something. Prefer most-recent MRU entry; else
+  // the most-recently-active project on disk.
+  useEffect(() => {
+    if (activeCwd !== null) return;
+    if (recentProjects.length > 0) {
+      setActiveCwd(recentProjects[0].path);
+      return;
+    }
+    if (projects.length > 0) {
+      const top = projects
+        .slice()
+        .sort((a, b) => b.last_active - a.last_active)[0];
+      setActiveCwd(top.path);
+    }
+  }, [activeCwd, recentProjects, projects]);
+  const bumpRecentProject = (path: string) => {
+    setRecentProjects((prev) => {
+      const next: RecentProjectEntry[] = [
+        { path, at: Date.now() },
+        ...prev.filter((r) => r.path !== path),
+      ];
+      return next.slice(0, MAX_RECENT_PROJECTS);
+    });
+  };
+  const [grouped, setGrouped] = useAtom(allProjectsGroupedAtom);
+  const [, setSearchOpen] = useAtom(chatSearchOpenAtom);
   // Default all projects to collapsed on first load
   useEffect(() => {
-    if (collapsedGroups === null && projects.length > 0) {
-      setCollapsedGroups(new Set(projects.map((p) => p.id)));
+    if (collapsedGroupsArr === null && projects.length > 0) {
+      setCollapsedGroupsArr(projects.map((p) => p.id));
     }
-  }, [projects, collapsedGroups]);
-
-  useEffect(() => {
-    if (searchOpen) {
-      requestAnimationFrame(() => searchInputRef.current?.focus());
-    } else {
-      setSearchQuery("");
-    }
-  }, [searchOpen]);
-
-  // Global ⌘K / Ctrl+K to open search modal
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
-        e.preventDefault();
-        setSearchOpen(true);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
-
-  // Build search index on mount
-  useEffect(() => {
-    invoke<number>("build_search_index")
-      .then(() => setIndexReady(true))
-      .catch(() => {});
-  }, []);
+  }, [projects, collapsedGroupsArr, setCollapsedGroupsArr]);
 
   // Single source-of-truth predicate for "does this session belong in the
   // currently-selected data source tab". Used by every list-shaping memo below.
@@ -320,44 +343,6 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appStarredIds]);
 
-  // Full-text search across session summaries/titles + content via search_chats
-  useEffect(() => {
-    if (!searchQuery.trim()) {
-      setSearchResults(null);
-      return;
-    }
-    const timer = setTimeout(async () => {
-      setSearching(true);
-      try {
-        const q = searchQuery.toLowerCase();
-        // Local matches by summary/title
-        const localMatches = allSessions.filter((s) => {
-          const summary = (s.summary || "").toLowerCase();
-          const title = (s.title || "").toLowerCase();
-          return summary.includes(q) || title.includes(q);
-        });
-
-        if (indexReady) {
-          // Full-text search for conversation content matches
-          const contentResults = await invoke<{ session_id: string }[]>(
-            "search_chats", { query: searchQuery, limit: 100 }
-          );
-          const localIds = new Set(localMatches.map((m) => m.id));
-          const contentSessionIds = new Set(
-            contentResults.map((r) => r.session_id).filter((id) => !localIds.has(id))
-          );
-          const contentMatches = allSessions.filter((s) => contentSessionIds.has(s.id));
-          setSearchResults([...localMatches, ...contentMatches]);
-        } else {
-          setSearchResults(localMatches);
-        }
-      } finally {
-        setSearching(false);
-      }
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [searchQuery, allSessions, indexReady]);
-
   const loading = loadingProjects || loadingSessions;
 
   // Sessions visible under the current data source — used for the header counter
@@ -395,7 +380,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
       const sessions = allSessions
         .filter((s) => {
           if (!s.project_path) return false;
-          if (hideEmptySessions && s.message_count === 0) return false;
+          if (hideEmptySessions && s.rounds === 0) return false;
           if (!matchesDataSource(s)) return false;
           if (effectivePinnedSet.has(s.id)) return false; // surfaced in the top Pinned section
           return normalizePath(s.project_path) === projectPathNorm;
@@ -403,7 +388,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
         .sort((a, b) => {
           switch (sortBy) {
             case "recent": return b.last_modified - a.last_modified;
-            case "sessions": return b.message_count - a.message_count;
+            case "sessions": return b.rounds - a.rounds;
             case "name": return (a.summary || "").localeCompare(b.summary || "");
           }
         });
@@ -422,7 +407,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
       .filter((s) => {
         if (seen.has(s.id)) return false; // defensive dedupe — backend may emit dupes for same cliSessionId
         seen.add(s.id);
-        if (hideEmptySessions && s.message_count === 0) return false;
+        if (hideEmptySessions && s.rounds === 0) return false;
         return matchesDataSource(s);
       })
       .sort((a, b) => b.last_modified - a.last_modified);
@@ -432,14 +417,14 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
     if (grouped) return [];
     return allSessions
       .filter((s) => {
-        if (s.message_count === 0 && hideEmptySessions) return false;
+        if (s.rounds === 0 && hideEmptySessions) return false;
         if (effectivePinnedSet.has(s.id)) return false; // surfaced in the top Pinned section
         return matchesDataSource(s);
       })
       .sort((a, b) => {
         switch (sortBy) {
           case "recent": return b.last_modified - a.last_modified;
-          case "sessions": return b.message_count - a.message_count;
+          case "sessions": return b.rounds - a.rounds;
           case "name": return (a.summary || "").localeCompare(b.summary || "");
         }
       });
@@ -469,11 +454,11 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
   };
 
   const toggleCollapse = (id: string) => {
-    setCollapsedGroups((prev) => {
+    setCollapsedGroupsArr((prev) => {
       const next = new Set(prev ?? []);
       if (next.has(id)) next.delete(id);
       else next.add(id);
-      return next;
+      return Array.from(next);
     });
   };
 
@@ -580,8 +565,8 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
 
         {/* Session List */}
         <div className="px-2 pb-4 space-y-0.5">
-          {/* Pinned section — independent of grouped/flat, hidden during search */}
-          {searchResults === null && pinnedSessions.length > 0 && (
+          {/* Pinned section — independent of grouped/flat */}
+          {pinnedSessions.length > 0 && (
             <div className="mb-1">
               <SectionHeader
                 icon={<Pin className="w-3 h-3 fill-current text-primary/60" />}
@@ -597,8 +582,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
                       key={`pinned-${session.id}`}
                       session={session}
                       isSelected={selectedSession?.id === session.id}
-                      onClick={() => setSelectedSession(prev => prev?.id === session.id ? null : session)}
-                      onDoubleClick={() => onSelectSession(session)}
+                      onClick={() => setSelectedSession(session)}
                       toReadable={toReadable}
                       showProject
                       isPinned
@@ -611,29 +595,8 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
             </div>
           )}
 
-          {searchResults !== null ? (
-            // Search results (flat) — Pinned/Recent grouping suppressed during search
-            searchResults.length === 0 ? (
-              <div className="text-xs text-muted-foreground px-2 py-4 text-center">No results</div>
-            ) : (
-              searchResults.map((session) => (
-                <SessionItemButton
-                  key={session.id}
-                  session={session}
-                  isSelected={selectedSession?.id === session.id}
-                  onClick={() => setSelectedSession(prev => prev?.id === session.id ? null : session)}
-                  onDoubleClick={() => onSelectSession(session)}
-                  toReadable={toReadable}
-                  showProject
-                  highlight={searchQuery}
-                  isPinned={effectivePinnedSet.has(session.id)}
-                  onTogglePin={() => togglePin(session.id)}
-                />
-              ))
-            )
-          ) : (
-            // Recent section header (wraps grouped or flat list)
-            <>
+          {/* Recent section header (wraps grouped or flat list) */}
+          <>
               <SectionHeader
                 icon={<ListBulletIcon className="w-3 h-3" />}
                 label="Recent"
@@ -645,38 +608,32 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
                     <DropdownMenuTrigger asChild>
                       <button
                         onClick={(e) => e.stopPropagation()}
-                        className="p-0.5 rounded hover:text-ink hover:bg-card-alt transition-colors opacity-0 group-hover:opacity-100"
+                        className="p-0.5 rounded text-muted-foreground hover:text-ink hover:bg-card-alt transition-colors"
                         title="Recent options"
+                        aria-label="Recent options"
                       >
-                        <DotsHorizontalIcon className="w-3 h-3" />
+                        <SlidersHorizontal className="w-3 h-3" />
                       </button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end" className="min-w-[200px]">
+                      <DropdownMenuLabel className="text-xs">Group by</DropdownMenuLabel>
+                      <DropdownMenuRadioGroup value={grouped ? "project" : "none"} onValueChange={(v) => setGrouped(v === "project")}>
+                        <DropdownMenuRadioItem value="project">Project</DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem value="none">None (flat)</DropdownMenuRadioItem>
+                      </DropdownMenuRadioGroup>
+                      <DropdownMenuSeparator />
                       <DropdownMenuLabel className="text-xs">Sort by</DropdownMenuLabel>
                       <DropdownMenuRadioGroup value={sortBy} onValueChange={(v) => setSortBy(v as typeof sortBy)}>
                         <DropdownMenuRadioItem value="recent">Recent</DropdownMenuRadioItem>
                         <DropdownMenuRadioItem value="name">Name</DropdownMenuRadioItem>
                       </DropdownMenuRadioGroup>
                       <DropdownMenuSeparator />
-                      <DropdownMenuItem onClick={() => setGrouped(!grouped)} className="gap-2">
-                        {grouped ? <ListBulletIcon className="w-3.5 h-3.5" /> : <GroupIcon className="w-3.5 h-3.5" />}
-                        {grouped ? "Flat view" : "Grouped view"}
-                      </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => setHideEmptySessions(!hideEmptySessions)} className="gap-2">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          {hideEmptySessions ? (
-                            <><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><path d="m2 2 20 20"/></>
-                          ) : (
-                            <><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></>
-                          )}
-                        </svg>
-                        {hideEmptySessions ? "Show empty sessions" : "Hide empty sessions"}
-                      </DropdownMenuItem>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem onClick={syncPinsFromApp} className="gap-2">
-                        <Pin className="w-3.5 h-3.5" />
-                        Sync pins from Claude app
-                      </DropdownMenuItem>
+                      <DropdownMenuCheckboxItem
+                        checked={hideEmptySessions}
+                        onCheckedChange={(c) => setHideEmptySessions(!!c)}
+                      >
+                        Hide empty sessions
+                      </DropdownMenuCheckboxItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
                 }
@@ -723,8 +680,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
                             key={session.id}
                             session={session}
                             isSelected={selectedSession?.id === session.id}
-                            onClick={() => setSelectedSession(prev => prev?.id === session.id ? null : session)}
-                            onDoubleClick={() => onSelectSession(session)}
+                            onClick={() => setSelectedSession(session)}
                             toReadable={toReadable}
                             isPinned={effectivePinnedSet.has(session.id)}
                             onTogglePin={() => togglePin(session.id)}
@@ -747,8 +703,7 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
                 key={session.id}
                 session={session}
                 isSelected={selectedSession?.id === session.id}
-                onClick={() => setSelectedSession(prev => prev?.id === session.id ? null : session)}
-                onDoubleClick={() => onSelectSession(session)}
+                onClick={() => setSelectedSession(session)}
                 toReadable={toReadable}
                 showProject
                 isPinned={effectivePinnedSet.has(session.id)}
@@ -757,10 +712,9 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
             ))
           ))}
             </>
-          )}
 
           {/* Web tab — Import group at the end */}
-          {searchResults === null && dataSource === "app-web" && (
+          {dataSource === "app-web" && (
             <div className="mb-1">
               <SectionHeader
                 icon={<Upload className="w-3 h-3" />}
@@ -806,36 +760,29 @@ export function ProjectList({ onSelectProject, onSelectSession }: ProjectListPro
           <SessionDetail
             session={selectedSession}
             onClose={() => setSelectedSession(null)}
-            highlight={searchResults !== null ? searchQuery : undefined}
-            scrollRef={detailScrollRef}
           />
         ) : (
-          <div className="flex-1 overflow-y-auto flex flex-col items-center justify-center px-8 gap-4 text-muted-foreground text-sm">
-            <span>Select a session to preview</span>
-            <div className="w-full max-w-2xl">
-              <ActivityCard />
+          <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+            <div className="flex-1 min-h-0 overflow-y-auto flex flex-col items-center px-8 pt-8 gap-4 text-muted-foreground text-sm">
+              <span>Start a new conversation, or select one from the left</span>
+              <div className="w-full max-w-2xl">
+                <ActivityCard />
+              </div>
             </div>
+            <NewSessionComposer
+              cwd={activeCwd}
+              onCwdChange={(p) => {
+                setActiveCwd(p);
+                bumpRecentProject(p);
+              }}
+              projects={projects}
+              recentProjects={recentProjects}
+              onSpawn={bumpRecentProject}
+            />
           </div>
         )}
       </div>
 
-      {/* Algolia-style search modal */}
-      {searchOpen && (
-        <SearchModal
-          query={searchQuery}
-          onQueryChange={setSearchQuery}
-          results={searchResults ?? []}
-          searching={searching}
-          indexReady={indexReady}
-          inputRef={searchInputRef}
-          toReadable={toReadable}
-          onSelect={(s) => {
-            setSelectedSession(s);
-            setSearchOpen(false);
-          }}
-          onClose={() => setSearchOpen(false)}
-        />
-      )}
     </div>
   );
 }
@@ -849,137 +796,6 @@ function emptyStateLabel(ds: "all" | "local" | "app-code" | "app-web" | "app-cow
     case "app-web":    return "app web ";
     case "app-cowork": return "cowork ";
   }
-}
-
-// ============================================================================
-// Algolia-style search modal
-// ============================================================================
-
-function SearchModal({
-  query,
-  onQueryChange,
-  results,
-  searching,
-  indexReady,
-  inputRef,
-  toReadable,
-  onSelect,
-  onClose,
-}: {
-  query: string;
-  onQueryChange: (v: string) => void;
-  results: Session[];
-  searching: boolean;
-  indexReady: boolean;
-  inputRef: React.RefObject<HTMLInputElement | null>;
-  toReadable: (s: string | null) => string;
-  onSelect: (s: Session) => void;
-  onClose: () => void;
-}) {
-  const [activeIdx, setActiveIdx] = useState(0);
-
-  useEffect(() => { setActiveIdx(0); }, [query, results.length]);
-
-  const onKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Escape") { e.preventDefault(); onClose(); return; }
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setActiveIdx((i) => Math.min(i + 1, Math.max(0, results.length - 1)));
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setActiveIdx((i) => Math.max(i - 1, 0));
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      const s = results[activeIdx];
-      if (s) onSelect(s);
-    }
-  };
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center pt-24 px-4 bg-black/40 backdrop-blur-sm"
-      onClick={onClose}
-    >
-      <div
-        className="w-full max-w-2xl bg-card border border-border rounded-2xl shadow-2xl overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={onKeyDown}
-      >
-        <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
-          <MagnifyingGlassIcon className="w-4 h-4 text-muted-foreground shrink-0" />
-          <input
-            ref={inputRef}
-            type="text"
-            value={query}
-            onChange={(e) => onQueryChange(e.target.value)}
-            placeholder={indexReady ? "Search conversations..." : "Building search index..."}
-            className="flex-1 bg-transparent text-sm text-ink placeholder:text-muted-foreground focus:outline-none"
-          />
-          {searching && <span className="text-xs text-muted-foreground">...</span>}
-          <kbd className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-border bg-card-alt text-muted-foreground">ESC</kbd>
-        </div>
-
-        <div className="max-h-[60vh] overflow-y-auto">
-          {!query.trim() ? (
-            <div className="px-4 py-8 text-center text-sm text-muted-foreground">
-              Type to search across all conversations
-            </div>
-          ) : results.length === 0 && !searching ? (
-            <div className="px-4 py-8 text-center text-sm text-muted-foreground">No results</div>
-          ) : (
-            <div className="py-1">
-              {results.map((s, i) => {
-                const title = s.title || toReadable(s.summary) || "Untitled";
-                const projectName = s.project_path?.split("/").pop() ?? "";
-                const isActive = i === activeIdx;
-                return (
-                  <button
-                    key={s.id}
-                    onClick={() => onSelect(s)}
-                    onMouseEnter={() => setActiveIdx(i)}
-                    className={`w-full text-left flex items-center gap-2 px-4 py-2 text-sm transition-colors ${
-                      isActive ? "bg-primary/10 text-ink" : "text-muted-foreground hover:bg-card-alt"
-                    }`}
-                  >
-                    <span className="shrink-0 inline-block w-1.5 h-1.5 rounded-full border border-current opacity-50" />
-                    <div className="truncate flex-1 min-w-0">
-                      <div className="truncate">
-                        <HighlightText text={title} query={query} />
-                      </div>
-                      {projectName && (
-                        <div className="text-[11px] text-muted-foreground/70 truncate">
-                          <HighlightText text={projectName} query={query} />
-                        </div>
-                      )}
-                    </div>
-                    <span className="text-[10px] text-muted-foreground tabular-nums shrink-0">
-                      {s.message_count}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
-        <div className="flex items-center gap-3 px-4 py-2 border-t border-border text-[10px] text-muted-foreground/80">
-          <span className="flex items-center gap-1">
-            <kbd className="font-mono px-1 rounded border border-border bg-card-alt">↑</kbd>
-            <kbd className="font-mono px-1 rounded border border-border bg-card-alt">↓</kbd>
-            navigate
-          </span>
-          <span className="flex items-center gap-1">
-            <kbd className="font-mono px-1 rounded border border-border bg-card-alt">↵</kbd>
-            open
-          </span>
-          <span className="flex items-center gap-1">
-            <kbd className="font-mono px-1 rounded border border-border bg-card-alt">esc</kbd>
-            close
-          </span>
-        </div>
-      </div>
-    </div>
-  );
 }
 
 // ============================================================================
@@ -1035,7 +851,6 @@ function SessionItemButton({
   session,
   isSelected,
   onClick,
-  onDoubleClick,
   toReadable,
   showProject,
   highlight,
@@ -1045,21 +860,21 @@ function SessionItemButton({
   session: Session;
   isSelected: boolean;
   onClick: () => void;
-  onDoubleClick: () => void;
   toReadable: (s: string | null) => string;
   showProject?: boolean;
   highlight?: string;
   isPinned?: boolean;
   onTogglePin?: () => void;
 }) {
-  const titleText = session.title || toReadable(session.summary) || "Untitled";
+  const label = resolveSessionLabel(session, toReadable);
+  const titleText = label.text;
+  const labelBadge = titleSourceBadge(label.source);
   const projectName = session.project_path?.split("/").pop() ?? "";
   const missingCwds = useCwdValidity([session.project_path]);
   const cwdMissing = !!session.project_path && missingCwds.has(session.project_path);
   return (
     <div
       onClick={onClick}
-      onDoubleClick={onDoubleClick}
       className={`group relative w-full text-left flex items-center gap-1.5 px-2 py-1 rounded text-xs transition-colors min-w-0 cursor-pointer ${
         isSelected
           ? "bg-primary/10 text-ink"
@@ -1067,15 +882,30 @@ function SessionItemButton({
       } ${cwdMissing ? "opacity-60" : ""}`}
     >
       <span
-        className={`shrink-0 inline-block w-1.5 h-1.5 rounded-full border ${
-          isPinned
-            ? "bg-primary border-primary"
-            : "border-current opacity-50"
+        className={`shrink-0 inline-block w-1.5 h-1.5 rounded-full ${
+          isPinned ? "ring-1 ring-primary ring-offset-1 ring-offset-background " : ""
+        }${
+          label.source === "custom"  ? "bg-foreground" :
+          label.source === "ai"      ? "bg-primary" :
+          label.source === "summary" ? "bg-blue-500" :
+          label.source === "slug"    ? "bg-emerald-500" :
+          label.source === "prompt"  ? "bg-muted-foreground/40" :
+                                        "bg-muted-foreground/20"
         }`}
+        title={
+          (isPinned ? "置顶 · " : "") +
+          `标题来源：${labelBadge ?? "未知"}`
+        }
         aria-hidden
       />
       <div className="truncate flex-1 min-w-0">
-        <span className="truncate block">
+        <span
+          className={`truncate block ${
+            label.source === "prompt" || label.source === "none"
+              ? "text-muted-foreground/80 italic"
+              : ""
+          }`}
+        >
           <HighlightText text={titleText} query={highlight} />
         </span>
         {showProject && session.project_path && (
@@ -1090,9 +920,6 @@ function SessionItemButton({
         </span>
       )}
       <div className="flex items-center gap-1 shrink-0">
-        <span className="text-[10px] text-muted-foreground tabular-nums group-hover:hidden">
-          {session.message_count}
-        </span>
         <DropdownMenu>
           <DropdownMenuTrigger asChild onClick={(e) => e.stopPropagation()}>
             <button
@@ -1126,7 +953,7 @@ function groupConsecutiveByRole(messages: Message[]): Message[][] {
   const groups: Message[][] = [];
   for (const msg of messages) {
     const last = groups[groups.length - 1];
-    if (last && last[0].role === msg.role) last.push(msg);
+    if (last && last[0].role === msg.role && msg.role !== "user") last.push(msg);
     else groups.push([msg]);
   }
   return groups;
@@ -1150,6 +977,120 @@ function useGroupCollapse(deps: unknown[], initialExpanded = false) {
   return { expanded, setExpanded, isOverflow, ref };
 }
 
+function StickyPromptList({
+  groupedMessages,
+  userPromptsOnly,
+  originalChat,
+  markdownPreview,
+  expandMessages,
+  highlight,
+  toReadable,
+  onCopy,
+  cwd,
+}: {
+  groupedMessages: Message[][];
+  userPromptsOnly: boolean;
+  originalChat: boolean;
+  markdownPreview: boolean;
+  expandMessages: boolean;
+  highlight?: string;
+  toReadable: (s: string | null) => string;
+  onCopy: (content: string) => void;
+  cwd?: string;
+}) {
+  // Slice grouped messages into "sections": each section starts with a user prompt
+  // and includes all subsequent assistant groups until the next user prompt.
+  // The user prompt is `sticky top-0` within its section, so when the section
+  // scrolls out, the next section's prompt naturally pushes it away — exactly
+  // the "relay" behavior. No JS scroll tracking needed.
+  type Section = { groups: Message[][]; startIdx: number };
+  const sections = useMemo<Section[]>(() => {
+    const result: Section[] = [];
+    let current: Section | null = null;
+    groupedMessages.forEach((g, i) => {
+      const isUser = g[0].role === "user";
+      if (isUser || current === null) {
+        current = { groups: [g], startIdx: i };
+        result.push(current);
+      } else {
+        current.groups.push(g);
+      }
+    });
+    return result;
+  }, [groupedMessages]);
+
+  let userCounter = 0;
+  return (
+    <>
+      {sections.map((section) => {
+        const head = section.groups[0];
+        const headIsUser = head[0].role === "user";
+        return (
+          <div key={`${head[0].uuid}-${head[0].line_number}`}>
+            {section.groups.map((group) => {
+              const isUserGroup = group[0].role === "user";
+              const promptIndex = isUserGroup ? ++userCounter : undefined;
+              const sticky = isUserGroup && headIsUser && !userPromptsOnly;
+              return (
+                <MessageGroupCard
+                  key={`${group[0].uuid}-${group[0].line_number}`}
+                  group={group}
+                  originalChat={originalChat}
+                  markdownPreview={markdownPreview}
+                  expandMessages={expandMessages}
+                  highlight={highlight}
+                  toReadable={toReadable}
+                  onCopy={onCopy}
+                  cwd={cwd}
+                  promptIndex={promptIndex}
+                  sticky={sticky}
+                />
+              );
+            })}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+const PROMPT_HEAD_LINES = 3;
+const PROMPT_TAIL_LINES = 2;
+const PROMPT_COMPRESS_THRESHOLD = PROMPT_HEAD_LINES + PROMPT_TAIL_LINES + 1;
+
+function compressPromptText(text: string): { compressed: string; omittedLines: number } | null {
+  const lines = text.split("\n");
+  if (lines.length < PROMPT_COMPRESS_THRESHOLD) return null;
+  const head = lines.slice(0, PROMPT_HEAD_LINES);
+  const tail = lines.slice(-PROMPT_TAIL_LINES);
+  const omitted = lines.length - PROMPT_HEAD_LINES - PROMPT_TAIL_LINES;
+  return {
+    compressed: [...head, `··· ${omitted} 行省略 ···`, ...tail].join("\n"),
+    omittedLines: omitted,
+  };
+}
+
+async function openPromptDetailWindow(content: string, title: string) {
+  const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+  const label = `prompt-detail-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const url = `index.html#/prompt-detail?content=${encodeURIComponent(content)}&title=${encodeURIComponent(title)}`;
+  try {
+    const win = new WebviewWindow(label, {
+      url,
+      title: title || "Prompt",
+      width: 720,
+      height: 600,
+      minWidth: 360,
+      minHeight: 240,
+      titleBarStyle: "overlay",
+      hiddenTitle: true,
+    });
+    win.once("tauri://error", (e) => console.warn("[prompt-detail] window error:", e));
+  } catch (err) {
+    console.warn("[prompt-detail] open failed:", err);
+  }
+}
+
 function MessageGroupCard({
   group,
   originalChat,
@@ -1159,6 +1100,8 @@ function MessageGroupCard({
   toReadable,
   onCopy,
   cwd,
+  promptIndex,
+  sticky,
 }: {
   group: Message[];
   originalChat: boolean;
@@ -1168,6 +1111,8 @@ function MessageGroupCard({
   toReadable: (s: string | null) => string;
   onCopy: (content: string) => void;
   cwd?: string;
+  promptIndex?: number;
+  sticky?: boolean;
 }) {
   const groupContent = group.map((m) => toReadable(m.content)).join("\n\n");
   const firstTs = group[0].timestamp;
@@ -1179,40 +1124,69 @@ function MessageGroupCard({
   const showHover = hovered ? "opacity-100" : "opacity-0";
 
   const isUser = group[0].role === "user";
+  const userPromptText = isUser ? groupContent : "";
+  const userPromptCompressed = isUser ? compressPromptText(userPromptText) : null;
 
   return (
     <div
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
-      className={`relative py-1.5 pl-4 pr-10 border-b border-border/40 ${
-        isUser ? "bg-primary/[0.07]" : "bg-card"
-      }`}
+      onDoubleClick={
+        isUser
+          ? () => {
+              const titleSrc = userPromptText.split("\n").find((l) => l.trim()) ?? "Prompt";
+              openPromptDetailWindow(
+                userPromptText,
+                promptIndex !== undefined
+                  ? `#${promptIndex} ${titleSrc.slice(0, 60)}`
+                  : titleSrc.slice(0, 60),
+              );
+            }
+          : undefined
+      }
+      className={`relative py-1.5 pl-4 pr-10 border-b ${
+        isUser
+          ? "border-border bg-card before:absolute before:inset-0 before:bg-primary/[0.07] before:pointer-events-none"
+          : "bg-card border-border/40"
+      } ${sticky ? "sticky top-0 z-10" : ""} ${isUser ? "select-none cursor-pointer" : ""}`}
+      title={isUser ? "Double-click to open in window" : undefined}
     >
-      <div className="min-w-0">
-        <div
-          ref={ref}
-          onClick={() => {
-            if (!expanded && isOverflow) setExpanded(true);
-          }}
-          className={`text-sm leading-relaxed text-ink ${
-            expanded ? "" : `max-h-20 overflow-hidden ${isOverflow ? "cursor-pointer" : ""}`
-          }`}
-        >
-          <div className="space-y-1.5">
-            {group.map((msg, idx) => (
-              <div
-                key={msg.uuid}
-                className={idx > 0 ? "pt-1.5 border-t border-border/30" : ""}
-              >
-                {msg.content_blocks && !originalChat ? (
-                  <ContentBlockRenderer blocks={msg.content_blocks} markdown={markdownPreview} highlight={highlight} disableTextCollapse cwd={cwd} />
-                ) : (
-                  <CollapsibleContent content={toReadable(msg.content)} markdown={markdownPreview} highlight={highlight} disableCollapse cwd={cwd} />
-                )}
-              </div>
-            ))}
+      <div className="relative min-w-0">
+        {promptIndex !== undefined && (
+          <div className="text-[10px] font-mono text-muted-foreground/70 mb-0.5 select-none">
+            #{promptIndex}
           </div>
-        </div>
+        )}
+        {isUser ? (
+          <div className="text-sm leading-relaxed text-ink whitespace-pre-wrap break-words select-text cursor-text">
+            {userPromptCompressed ? userPromptCompressed.compressed : userPromptText}
+          </div>
+        ) : (
+          <div
+            ref={ref}
+            onClick={() => {
+              if (!expanded && isOverflow) setExpanded(true);
+            }}
+            className={`text-sm leading-relaxed text-ink ${
+              expanded ? "" : `max-h-20 overflow-hidden ${isOverflow ? "cursor-pointer" : ""}`
+            }`}
+          >
+            <div className="space-y-1.5">
+              {group.map((msg, idx) => (
+                <div
+                  key={`${msg.uuid}-${msg.line_number}`}
+                  className={idx > 0 ? "pt-1.5 border-t border-border/30" : ""}
+                >
+                  {msg.content_blocks && !originalChat ? (
+                    <ContentBlockRenderer blocks={msg.content_blocks} markdown={markdownPreview} highlight={highlight} disableTextCollapse cwd={cwd} />
+                  ) : (
+                    <CollapsibleContent content={toReadable(msg.content)} markdown={markdownPreview} highlight={highlight} disableCollapse cwd={cwd} />
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
       <div className={`absolute top-2 right-3 transition-opacity ${showHover}`}>
         <DropdownMenu>
@@ -1233,10 +1207,27 @@ function MessageGroupCard({
                 <DropdownMenuSeparator />
               </>
             )}
-            {isOverflow && (
+            {!isUser && isOverflow && (
               <DropdownMenuItem onClick={() => setExpanded(!expanded)} className="gap-2 text-xs">
                 {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
                 {expanded ? "Collapse" : "Expand"}
+              </DropdownMenuItem>
+            )}
+            {isUser && (
+              <DropdownMenuItem
+                onClick={() => {
+                  const titleSrc = userPromptText.split("\n").find((l) => l.trim()) ?? "Prompt";
+                  openPromptDetailWindow(
+                    userPromptText,
+                    promptIndex !== undefined
+                      ? `#${promptIndex} ${titleSrc.slice(0, 60)}`
+                      : titleSrc.slice(0, 60),
+                  );
+                }}
+                className="gap-2 text-xs"
+              >
+                <ExternalLink size={13} />
+                Open in window
               </DropdownMenuItem>
             )}
             <DropdownMenuItem onClick={() => onCopy(groupContent)} className="gap-2 text-xs">
@@ -1278,8 +1269,94 @@ function CwdMissingBanner({ from }: { from: string }) {
   );
 }
 
-function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Session; onClose: () => void; highlight?: string; scrollRef?: React.RefObject<HTMLDivElement | null> }) {
-  const { formatPath } = useAppConfig();
+/** Inline-editable session title. Editing writes back to the Claude desktop-app
+ *  meta file via `set_session_title` — only app-code sessions are writable. */
+function EditableSessionTitle({
+  sessionId,
+  value,
+  canEdit,
+  className = "",
+}: {
+  sessionId: string;
+  value: string;
+  canEdit: boolean;
+  className?: string;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const queryClient = useQueryClient();
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!editing) setDraft(value);
+  }, [value, editing]);
+
+  useEffect(() => {
+    if (editing) inputRef.current?.select();
+  }, [editing]);
+
+  const commit = async () => {
+    const next = draft.trim();
+    if (!next || next === value) {
+      setEditing(false);
+      setDraft(value);
+      return;
+    }
+    try {
+      await invoke("set_session_title", { sessionId, title: next });
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    } catch (e) {
+      console.error("set_session_title", e);
+      setDraft(value);
+    }
+    setEditing(false);
+  };
+
+  const cancel = () => {
+    setEditing(false);
+    setDraft(value);
+  };
+
+  if (!canEdit) {
+    return (
+      <span className={`truncate ${className}`} title={value}>
+        {value}
+      </span>
+    );
+  }
+
+  if (editing) {
+    return (
+      <span className={`inline-flex items-center gap-1 min-w-0 ${className}`}>
+        <input
+          ref={inputRef}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commit();
+            else if (e.key === "Escape") cancel();
+          }}
+          className="min-w-0 flex-1 bg-card border border-border rounded px-1.5 py-0.5 text-base font-serif font-semibold text-ink outline-none focus:border-primary"
+        />
+      </span>
+    );
+  }
+
+  return (
+    <button
+      onClick={() => setEditing(true)}
+      title="Click to rename"
+      className={`inline-flex items-center gap-1 min-w-0 truncate text-left hover:text-primary group ${className}`}
+    >
+      <span className="truncate">{value}</span>
+      <Pencil className="w-3 h-3 shrink-0 opacity-0 group-hover:opacity-60" />
+    </button>
+  );
+}
+
+function SessionDetail({ session, onClose, highlight }: { session: Session; onClose: () => void; highlight?: string }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
   const toReadable = useReadableText();
   const missingCwds = useCwdValidity([session.project_path]);
   const cwdMissing = !!session.project_path && missingCwds.has(session.project_path);
@@ -1290,10 +1367,10 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
   const [userPromptsOnly, setUserPromptsOnly] = useAtom(userPromptsOnlyAtom);
   const [expandMessages, setExpandMessages] = useAtom(expandMessagesAtom);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
-  const [modelSearch, setModelSearch] = useState("");
-  const [recentModels, setRecentModels] = useAtom(recentModelsAtom);
 
-  const displaySummary = session.title || toReadable(session.summary) || "Untitled";
+  const headerLabel = resolveSessionLabel(session, toReadable);
+  const displaySummary = headerLabel.text;
+  const headerBadge = titleSourceBadge(headerLabel.source);
 
   const { data: liveUsage } = useInvokeQuery<import("../../types").SessionUsage>(
     ["session-usage", session.project_id, session.id],
@@ -1302,100 +1379,7 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
   );
   const usage = liveUsage ?? session.usage;
 
-  // Active provider/model selector (reads from MaaS Registry + ~/.claude/settings.json)
-  const queryClient = useQueryClient();
-  const { data: maasRegistry = [] } = useInvokeQuery<import("../../types").MaasProvider[]>(
-    ["maas_registry"],
-    "get_maas_registry",
-  );
-  const { data: claudeSettings } = useInvokeQuery<import("../../types").ClaudeSettings>(
-    ["settings"],
-    "get_settings",
-  );
-  const activeProviderKey: string | null = (() => {
-    const raw = claudeSettings?.raw;
-    if (!raw || typeof raw !== "object") return null;
-    const lovcode = (raw as Record<string, unknown>).lovcode;
-    if (!lovcode || typeof lovcode !== "object") return null;
-    const v = (lovcode as Record<string, unknown>).activeProvider;
-    return typeof v === "string" ? v : null;
-  })();
-  const activeModelName: string | null = (() => {
-    const raw = claudeSettings?.raw;
-    if (!raw || typeof raw !== "object") return null;
-    const env = (raw as Record<string, unknown>).env;
-    if (!env || typeof env !== "object") return null;
-    const v = (env as Record<string, unknown>).ANTHROPIC_DEFAULT_SONNET_MODEL;
-    return typeof v === "string" && v ? v : null;
-  })();
-  const activeProvider = activeProviderKey
-    ? maasRegistry.find((p) => p.key === activeProviderKey) ?? null
-    : null;
-  const activeModel =
-    activeProvider && activeModelName
-      ? activeProvider.models.find((m) => m.modelName === activeModelName) ?? null
-      : null;
-  const activeVendor =
-    activeProvider && activeModel?.vendor
-      ? activeProvider.vendors?.find((v) => v.id === activeModel.vendor) ?? null
-      : null;
-
-  /** Switch to a provider, keeping the same modelName if that provider exposes it,
-   *  otherwise picking its first available model. */
-  const switchActiveProvider = async (provider: import("../../types").MaasProvider) => {
-    if (provider.models.length === 0) {
-      console.warn("provider has no models:", provider.key);
-      return;
-    }
-    const keepCurrent =
-      activeModelName && provider.models.some((m) => m.modelName === activeModelName)
-        ? activeModelName
-        : provider.models[0].modelName;
-    await switchActiveModel(provider, keepCurrent);
-  };
-
-  const switchActiveModel = async (provider: import("../../types").MaasProvider, modelName: string) => {
-    try {
-      if (provider.key === "anthropic-subscription") {
-        await invoke("update_settings_env", { envKey: "CLAUDE_CODE_USE_OAUTH", envValue: "1" });
-        await invoke("delete_settings_env", { envKey: "ANTHROPIC_AUTH_TOKEN" }).catch(() => {});
-        await invoke("delete_settings_env", { envKey: "ANTHROPIC_BASE_URL" }).catch(() => {});
-        await invoke("delete_settings_env", { envKey: "ANTHROPIC_DEFAULT_SONNET_MODEL" }).catch(() => {});
-      } else {
-        await invoke("update_settings_env", {
-          envKey: "ANTHROPIC_BASE_URL",
-          envValue: provider.baseUrl.trim(),
-        });
-        await invoke("update_settings_env", {
-          envKey: "ANTHROPIC_AUTH_TOKEN",
-          envValue: provider.authToken.trim(),
-        });
-        await invoke("update_settings_env", {
-          envKey: "ANTHROPIC_DEFAULT_SONNET_MODEL",
-          envValue: modelName,
-        });
-        await invoke("delete_settings_env", { envKey: "CLAUDE_CODE_USE_OAUTH" }).catch(() => {});
-      }
-      await invoke("update_settings_field", {
-        field: "lovcode",
-        value: { activeProvider: provider.key },
-      });
-      queryClient.invalidateQueries({ queryKey: ["settings"] });
-
-      // Record MRU — prepend, dedupe, cap
-      setRecentModels((prev) => {
-        const next: RecentModelEntry[] = [
-          { providerKey: provider.key, modelName, at: Date.now() },
-          ...prev.filter(
-            (r) => !(r.providerKey === provider.key && r.modelName === modelName),
-          ),
-        ];
-        return next.slice(0, MAX_RECENT_MODELS);
-      });
-    } catch (e) {
-      console.error("switchActiveModel failed", e);
-    }
-  };
+  const selection = useMaasActiveSelection();
 
   useEffect(() => {
     let cancelled = false;
@@ -1417,6 +1401,12 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
     return result;
   }, [messages, originalChat, userPromptsOnly]);
 
+  const groupedMessages = useMemo(() => {
+    return userPromptsOnly
+      ? filteredMessages.map((m) => [m] as Message[])
+      : groupConsecutiveByRole(filteredMessages);
+  }, [filteredMessages, userPromptsOnly]);
+
   // A round = one user prompt (plus its following assistant turn). Count user messages from the
   // chat-only view so meta/tool entries don't inflate the number.
   const roundCount = useMemo(
@@ -1436,61 +1426,6 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
   // Only local CLI sessions can be resumed via `claude --resume`/`codex resume`.
   // app-code sessions point to the same .jsonl on disk, so they're also resumable.
   const canResume = (session.source === "cli" || session.source === "app-code") && !!session.project_path;
-  // Default agent inferred from session source (only "cli" reaches here, default to claude)
-  const defaultTerminal = TERMINAL_OPTIONS.find((o) => o.type === "claude") ?? TERMINAL_OPTIONS[0];
-  const [terminalOpt, setTerminalOpt] = useState<TerminalOption>(defaultTerminal);
-  const [resumeInput, setResumeInput] = useState("");
-  const composingRef = useRef(false);
-  const resumeTextareaRef = useRef<HTMLTextAreaElement>(null);
-  // Once submitted, we mount a TerminalPane keyed by ptyId and hide the prompt textarea
-  const [activePty, setActivePty] = useState<{ ptyId: string; cwd: string; command?: string; initialInput?: string } | null>(null);
-
-  // Reset prompt + tear down PTY when switching to a different session
-  useEffect(() => {
-    setResumeInput("");
-    setActivePty((prev) => {
-      if (prev) {
-        disposeTerminal(prev.ptyId);
-        invoke("pty_kill", { id: prev.ptyId }).catch(() => {});
-        invoke("pty_purge_scrollback", { id: prev.ptyId }).catch(() => {});
-      }
-      return null;
-    });
-  }, [session.id]);
-
-  const submitResume = () => {
-    if (!canResume || !session.project_path) return;
-    const prompt = resumeInput.trim();
-    let command: string | undefined;
-    let initialInput: string | undefined;
-    const escape = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-    if (terminalOpt.type === "claude") {
-      command = `claude --resume ${session.id}` + (prompt ? ` "${escape(prompt)}"` : "");
-    } else if (terminalOpt.type === "codex") {
-      command = `codex resume ${session.id}` + (prompt ? ` "${escape(prompt)}"` : "");
-    } else {
-      // Plain terminal: just open a shell, send prompt as initial input
-      initialInput = prompt || undefined;
-    }
-    setActivePty({
-      ptyId: crypto.randomUUID(),
-      cwd: session.project_path,
-      command,
-      initialInput,
-    });
-    setResumeInput("");
-  };
-
-  const closeActivePty = () => {
-    setActivePty((prev) => {
-      if (prev) {
-        disposeTerminal(prev.ptyId);
-        invoke("pty_kill", { id: prev.ptyId }).catch(() => {});
-        invoke("pty_purge_scrollback", { id: prev.ptyId }).catch(() => {});
-      }
-      return null;
-    });
-  };
 
   // Count matches from the actual rendered DOM (source of truth) after every render
   useEffect(() => {
@@ -1516,7 +1451,7 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
     if (!contentRef.current || matchCount === 0 || loading) return;
     const raf = requestAnimationFrame(() => {
       const root = contentRef.current;
-      const scroller = scrollRef?.current;
+      const scroller = scrollRef.current;
       if (!root) return;
       const hits = root.querySelectorAll<HTMLElement>("[data-search-hit]");
       if (hits.length === 0) return;
@@ -1546,28 +1481,48 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
       }
     });
     return () => cancelAnimationFrame(raf);
-  }, [activeMatch, matchCount, loading, scrollRef]);
+  }, [activeMatch, matchCount, loading]);
 
   const gotoMatch = (delta: number) => {
     if (matchCount === 0) return;
     setActiveMatch((prev) => (prev + delta + matchCount) % matchCount);
   };
 
+
   return (
     <div className="h-full flex flex-col min-h-0 min-w-0 overflow-hidden">
-      <header className="shrink-0 z-10 bg-background border-b border-border px-4 py-3 flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <h2
-            className="font-serif text-xl font-semibold text-ink leading-tight mb-1 truncate"
-            title={displaySummary}
-          >
-            {displaySummary}
-          </h2>
-          <p className="text-xs text-muted-foreground truncate">
-            {session.project_path ? formatPath(session.project_path) : session.project_id}
-            {" · "}
-            {`${roundCount} rounds`}
-          </p>
+      <header className="shrink-0 z-10 bg-background border-b border-border px-4 py-2.5 flex items-center justify-between gap-4">
+        <div className="min-w-0 flex items-center gap-2 text-sm">
+          {session.project_path ? (
+            <ProjectPathLabel
+              path={session.project_path}
+              className="text-muted-foreground max-w-[40%]"
+            />
+          ) : (
+            <span className="truncate text-muted-foreground">{session.project_id}</span>
+          )}
+          <span className="text-muted-foreground/50 shrink-0">/</span>
+          <EditableSessionTitle
+            sessionId={session.id}
+            canEdit={session.source === "app-code"}
+            value={displaySummary}
+            className="font-serif text-base font-semibold text-ink min-w-0 flex-1"
+          />
+          {headerBadge && (
+            <span
+              className={`shrink-0 inline-block w-2 h-2 rounded-full ${
+                headerLabel.source === "custom"  ? "bg-foreground" :
+                headerLabel.source === "ai"      ? "bg-primary" :
+                headerLabel.source === "summary" ? "bg-blue-500" :
+                headerLabel.source === "slug"    ? "bg-emerald-500" :
+                headerLabel.source === "prompt"  ? "bg-muted-foreground/40" :
+                                                    "bg-muted-foreground/20"
+              }`}
+              title={`标题来源：${headerBadge}`}
+              aria-label={`标题来源：${headerBadge}`}
+            />
+          )}
+          <span className="text-xs text-muted-foreground/70 shrink-0">· {roundCount} rounds</span>
         </div>
         <div className="flex items-center gap-3 shrink-0">
           {highlight?.trim() && (
@@ -1650,19 +1605,17 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
         </div>
       ) : (
         <div className="border-t border-border/40">
-          {(userPromptsOnly ? filteredMessages.map((m) => [m]) : groupConsecutiveByRole(filteredMessages)).map((group) => (
-            <MessageGroupCard
-              key={group[0].uuid}
-              group={group}
-              originalChat={originalChat}
-              markdownPreview={markdownPreview}
-              expandMessages={expandMessages}
-              highlight={highlight}
-              toReadable={toReadable}
-              onCopy={handleCopyContent}
-              cwd={session.project_path ?? undefined}
-            />
-          ))}
+          <StickyPromptList
+            groupedMessages={groupedMessages}
+            userPromptsOnly={userPromptsOnly}
+            originalChat={originalChat}
+            markdownPreview={markdownPreview}
+            expandMessages={expandMessages}
+            highlight={highlight}
+            toReadable={toReadable}
+            onCopy={handleCopyContent}
+            cwd={session.project_path ?? undefined}
+          />
         </div>
       )}
 
@@ -1678,366 +1631,805 @@ function SessionDetail({ session, onClose, highlight, scrollRef }: { session: Se
       </div>
 
       {/* Continue conversation: terminal-style prompt box pinned to the right pane bottom */}
-      {!canResume && (
-        <div className="shrink-0 min-w-0 px-6 pb-1 pt-3 border-t border-border bg-background overflow-hidden">
-          <div className="px-4 py-2.5 border border-dashed border-border rounded-xl bg-card/60 text-xs text-muted-foreground">
-            {session.source === "app-web"
+      <Composer
+        cwd={canResume ? session.project_path ?? null : null}
+        resetKey={session.id}
+        emptyMessage={
+          canResume
+            ? undefined
+            : session.source === "app-web"
               ? "This conversation was synced from claude.ai (web). Resume is only available for local CLI sessions."
               : session.source === "app-cowork"
-              ? "Cowork sessions cannot be resumed locally."
-              : "This session has no project path on disk and cannot be resumed."}
+                ? "Cowork sessions cannot be resumed locally."
+                : "This session has no project path on disk and cannot be resumed."
+        }
+        placeholder={(t) =>
+          t.type === "terminal"
+            ? "Open a shell in this project (Enter to start)"
+            : `Continue this conversation with ${t.label}...`
+        }
+        buildCommand={(t, prompt) => {
+          if (t.type === "terminal") return { initialInput: prompt || undefined };
+          const extra = t.type === "claude" ? `--resume ${session.id}` : `resume ${session.id}`;
+          return { command: buildAgentCommand(t.type, prompt, extra) };
+        }}
+        trailing={<PlatformModelPicker selection={selection} usage={usage} />}
+      />
+    </div>
+  );
+}
+
+// ============================================================================
+// Composer infrastructure
+// ----------------------------------------------------------------------------
+// Two call sites use the same terminal-style prompt box: `SessionDetail` (for
+// `claude --resume <id>`) and the right-panel empty state (for fresh
+// `claude` / `codex` / shell). They share the same input + Terminal selector
+// + inline PTY pattern; only the command builder and the toolbar trailing
+// slot differ. Everything below is the shared kit.
+// ============================================================================
+
+type ActivePty = { ptyId: string; cwd: string; command?: string; initialInput?: string };
+
+/** Build a `claude`/`codex` command from agent + prompt + optional argv passed
+ *  through verbatim (e.g. `--resume <id>`). */
+function buildAgentCommand(
+  agent: "claude" | "codex",
+  prompt: string,
+  extraArgs?: string,
+): string {
+  const escape = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const head = extraArgs ? `${agent} ${extraArgs}` : agent;
+  return prompt ? `${head} "${escape(prompt)}"` : head;
+}
+
+/** Owns the global Platform/Model selection. Reads from MaaS Registry +
+ *  ~/.claude/settings.json; writes flow back through Tauri. Hook so both
+ *  composers can drop in the picker without duplicating state. */
+function useMaasActiveSelection() {
+  const queryClient = useQueryClient();
+  const [recentModels, setRecentModels] = useAtom(recentModelsAtom);
+  const { data: maasRegistry = [] } = useInvokeQuery<import("../../types").MaasProvider[]>(
+    ["maas_registry"],
+    "get_maas_registry",
+  );
+  const { data: claudeSettings } = useInvokeQuery<import("../../types").ClaudeSettings>(
+    ["settings"],
+    "get_settings",
+  );
+
+  const activeProviderKey: string | null = (() => {
+    const raw = claudeSettings?.raw;
+    if (!raw || typeof raw !== "object") return null;
+    const lovcode = (raw as Record<string, unknown>).lovcode;
+    if (!lovcode || typeof lovcode !== "object") return null;
+    const v = (lovcode as Record<string, unknown>).activeProvider;
+    return typeof v === "string" ? v : null;
+  })();
+  const activeModelName: string | null = (() => {
+    const raw = claudeSettings?.raw;
+    if (!raw || typeof raw !== "object") return null;
+    const env = (raw as Record<string, unknown>).env;
+    if (!env || typeof env !== "object") return null;
+    const v = (env as Record<string, unknown>).ANTHROPIC_DEFAULT_SONNET_MODEL;
+    return typeof v === "string" && v ? v : null;
+  })();
+  const activeProvider = activeProviderKey
+    ? maasRegistry.find((p) => p.key === activeProviderKey) ?? null
+    : null;
+  const activeModel =
+    activeProvider && activeModelName
+      ? activeProvider.models.find((m) => m.modelName === activeModelName) ?? null
+      : null;
+  const activeVendor =
+    activeProvider && activeModel?.vendor
+      ? activeProvider.vendors?.find((v) => v.id === activeModel.vendor) ?? null
+      : null;
+
+  const switchActiveModel = async (
+    provider: import("../../types").MaasProvider,
+    modelName: string,
+  ) => {
+    try {
+      if (provider.key === "anthropic-subscription") {
+        await invoke("update_settings_env", { envKey: "CLAUDE_CODE_USE_OAUTH", envValue: "1" });
+        await invoke("update_settings_env", {
+          envKey: "ANTHROPIC_DEFAULT_SONNET_MODEL",
+          envValue: modelName,
+        });
+        await invoke("delete_settings_env", { envKey: "ANTHROPIC_AUTH_TOKEN" }).catch(() => {});
+        await invoke("delete_settings_env", { envKey: "ANTHROPIC_BASE_URL" }).catch(() => {});
+      } else {
+        await invoke("update_settings_env", {
+          envKey: "ANTHROPIC_BASE_URL",
+          envValue: provider.baseUrl.trim(),
+        });
+        await invoke("update_settings_env", {
+          envKey: "ANTHROPIC_AUTH_TOKEN",
+          envValue: provider.authToken.trim(),
+        });
+        await invoke("update_settings_env", {
+          envKey: "ANTHROPIC_DEFAULT_SONNET_MODEL",
+          envValue: modelName,
+        });
+        await invoke("delete_settings_env", { envKey: "CLAUDE_CODE_USE_OAUTH" }).catch(() => {});
+      }
+      await invoke("update_settings_field", {
+        field: "lovcode",
+        value: { activeProvider: provider.key },
+      });
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+
+      setRecentModels((prev) => {
+        const next: RecentModelEntry[] = [
+          { providerKey: provider.key, modelName, at: Date.now() },
+          ...prev.filter(
+            (r) => !(r.providerKey === provider.key && r.modelName === modelName),
+          ),
+        ];
+        return next.slice(0, MAX_RECENT_MODELS);
+      });
+    } catch (e) {
+      console.error("switchActiveModel failed", e);
+    }
+  };
+
+  const switchActiveProvider = async (provider: import("../../types").MaasProvider) => {
+    if (provider.models.length === 0) {
+      console.warn("provider has no models:", provider.key);
+      return;
+    }
+    const keepCurrent =
+      activeModelName && provider.models.some((m) => m.modelName === activeModelName)
+        ? activeModelName
+        : provider.models[0].modelName;
+    await switchActiveModel(provider, keepCurrent);
+  };
+
+  return {
+    maasRegistry,
+    activeProviderKey,
+    activeModelName,
+    activeProvider,
+    activeModel,
+    activeVendor,
+    recentModels,
+    switchActiveProvider,
+    switchActiveModel,
+  };
+}
+
+/** Platform + Model + optional context-window pill. Shared by both composers. */
+function PlatformModelPicker({
+  selection,
+  usage,
+}: {
+  selection: ReturnType<typeof useMaasActiveSelection>;
+  usage?: import("../../types").SessionUsage;
+}) {
+  const {
+    maasRegistry,
+    activeProviderKey,
+    activeModelName,
+    activeProvider,
+    activeModel,
+    activeVendor,
+    recentModels,
+    switchActiveProvider,
+    switchActiveModel,
+  } = selection;
+  const [modelSearch, setModelSearch] = useState("");
+
+  const histInfo = inferModelInfo(usage?.model);
+  const ctx = usage?.context_tokens ?? 0;
+  const pct =
+    histInfo?.contextWindow && ctx > 0
+      ? Math.min(100, Math.round((ctx / histInfo.contextWindow) * 100))
+      : null;
+  const ctxPart =
+    ctx > 0 ? `ctx ${formatTokens(ctx)}${pct !== null ? ` (${pct}%)` : ""}` : null;
+
+  const usableProviders = maasRegistry.filter((p) => {
+    if (COMING_SOON_PROVIDER_KEYS.has(p.key)) return false;
+    const hasAuth = p.key === "anthropic-subscription" || p.authToken.trim().length > 0;
+    return hasAuth && p.models.length > 0;
+  });
+
+  const providerLabel = activeProvider
+    ? activeProvider.label || activeProvider.key
+    : "Select platform";
+  const modelLabel = activeModel
+    ? activeModel.displayName
+    : activeProvider
+      ? "Select model"
+      : "—";
+
+  return (
+    <div className="flex items-center gap-1.5 min-w-0 flex-1">
+      <div className="flex flex-row-reverse items-center gap-1.5">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-card rounded-md transition-colors min-w-0"
+              title={
+                activeProvider
+                  ? `Platform: ${activeProvider.label || activeProvider.key}`
+                  : "No platform selected. Click to pick one."
+              }
+            >
+              <RocketIcon className="w-3.5 h-3.5 flex-shrink-0" />
+              <span className="truncate">{providerLabel}</span>
+              <ChevronDownIcon className="w-3 h-3 flex-shrink-0" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="min-w-[220px] max-w-[320px] p-0">
+            <div className="max-h-[360px] overflow-y-auto p-1">
+              {usableProviders.length === 0 ? (
+                <DropdownMenuItem disabled>
+                  <span className="text-xs text-muted-foreground">
+                    No providers ready. Open Settings → MaaS Registry.
+                  </span>
+                </DropdownMenuItem>
+              ) : (
+                usableProviders.map((p) => {
+                  const isCurrent = p.key === activeProviderKey;
+                  return (
+                    <DropdownMenuItem
+                      key={p.key}
+                      onClick={() => switchActiveProvider(p)}
+                      className={isCurrent ? "bg-primary/10" : ""}
+                    >
+                      <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                        {isCurrent ? (
+                          <CheckIcon className="w-3 h-3 text-primary flex-shrink-0" />
+                        ) : (
+                          <span className="w-3 flex-shrink-0" />
+                        )}
+                        <span className="text-xs font-medium truncate flex-1">
+                          {p.label || p.key}
+                        </span>
+                        <span className="text-[10px] text-muted-foreground flex-shrink-0">
+                          {p.models.length} model{p.models.length === 1 ? "" : "s"}
+                        </span>
+                      </div>
+                    </DropdownMenuItem>
+                  );
+                })
+              )}
+            </div>
+          </DropdownMenuContent>
+        </DropdownMenu>
+
+        <span className="text-xs text-muted-foreground/60 flex-shrink-0">/</span>
+
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              disabled={!activeProvider}
+              className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-card rounded-md transition-colors min-w-0 disabled:opacity-50 disabled:cursor-not-allowed"
+              title={
+                activeModel
+                  ? `Model: ${activeModel.modelName}${
+                      activeVendor ? `\nVendor: ${activeVendor.name}` : ""
+                    }`
+                  : activeProvider
+                    ? "Pick a model for this platform"
+                    : "Select a platform first"
+              }
+            >
+              <span className="truncate">{modelLabel}</span>
+              <ChevronDownIcon className="w-3 h-3 flex-shrink-0" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            align="end"
+            className="min-w-[260px] max-w-[380px] p-0"
+            onCloseAutoFocus={() => setModelSearch("")}
+          >
+            {activeProvider && activeProvider.models.length > 0 && (
+              <div className="p-1.5 border-b border-border">
+                <input
+                  type="text"
+                  autoFocus
+                  value={modelSearch}
+                  onChange={(e) => setModelSearch(e.target.value)}
+                  placeholder="Search id, name, vendor..."
+                  spellCheck={false}
+                  onKeyDown={(e) => {
+                    if (e.key !== "Escape" && e.key !== "Enter" && e.key !== "Tab") {
+                      e.stopPropagation();
+                    }
+                  }}
+                  className="w-full h-7 px-2 text-xs rounded bg-background border border-input focus:outline-none focus:ring-1 focus:ring-ring"
+                />
+              </div>
+            )}
+            <div className="max-h-[360px] overflow-y-auto p-1">
+              {!activeProvider ? (
+                <DropdownMenuItem disabled>
+                  <span className="text-xs text-muted-foreground">Pick a platform first</span>
+                </DropdownMenuItem>
+              ) : activeProvider.models.length === 0 ? (
+                <DropdownMenuItem disabled>
+                  <span className="text-xs text-muted-foreground">
+                    This platform has no models. Open Settings → MaaS Registry.
+                  </span>
+                </DropdownMenuItem>
+              ) : (() => {
+                const q = modelSearch.trim().toLowerCase();
+                const sorted = activeProvider.models
+                  .slice()
+                  .sort((a, b) => a.modelName.localeCompare(b.modelName));
+
+                const renderItem = (m: import("../../types").MaasModel, keyPrefix = "") => {
+                  const vendor = m.vendor
+                    ? activeProvider.vendors?.find((v) => v.id === m.vendor) ?? null
+                    : null;
+                  const isCurrent = m.modelName === activeModelName;
+                  return (
+                    <DropdownMenuItem
+                      key={`${keyPrefix}${m.id}`}
+                      onClick={() => switchActiveModel(activeProvider, m.modelName)}
+                      className={isCurrent ? "bg-primary/10" : ""}
+                    >
+                      <div className="flex flex-col gap-0.5 min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5">
+                          {isCurrent ? (
+                            <CheckIcon className="w-3 h-3 text-primary flex-shrink-0" />
+                          ) : (
+                            <span className="w-3 flex-shrink-0" />
+                          )}
+                          <span className="text-xs font-medium truncate">{m.displayName}</span>
+                          {vendor && (
+                            <span className="text-[10px] text-muted-foreground truncate">
+                              {vendor.name}
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-[10px] text-muted-foreground font-mono truncate pl-4">
+                          {m.modelName}
+                        </span>
+                      </div>
+                    </DropdownMenuItem>
+                  );
+                };
+
+                if (q) {
+                  const filtered = sorted.filter((m) => {
+                    const vendorName = m.vendor
+                      ? activeProvider.vendors?.find((v) => v.id === m.vendor)?.name ?? m.vendor
+                      : "";
+                    return (
+                      m.id.toLowerCase().includes(q) ||
+                      m.displayName.toLowerCase().includes(q) ||
+                      m.modelName.toLowerCase().includes(q) ||
+                      vendorName.toLowerCase().includes(q)
+                    );
+                  });
+                  if (filtered.length === 0) {
+                    return (
+                      <div className="px-2 py-3 text-center text-xs text-muted-foreground">
+                        No models match "{modelSearch}"
+                      </div>
+                    );
+                  }
+                  return filtered.map((m) => renderItem(m));
+                }
+
+                const recentForProvider = recentModels
+                  .filter((r) => r.providerKey === activeProvider.key)
+                  .map((r) => activeProvider.models.find((m) => m.modelName === r.modelName))
+                  .filter((m): m is import("../../types").MaasModel => !!m);
+
+                return (
+                  <>
+                    {recentForProvider.length > 0 && (
+                      <>
+                        <div className="px-2 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                          Recent
+                        </div>
+                        {recentForProvider.map((m) => renderItem(m, "recent:"))}
+                        <div className="my-1 border-t border-border" />
+                        <div className="px-2 pt-0.5 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                          All Models
+                        </div>
+                      </>
+                    )}
+                    {sorted.map((m) => renderItem(m, "all:"))}
+                  </>
+                );
+              })()}
+            </div>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+
+      {ctxPart && (
+        <span
+          className="text-[10px] text-muted-foreground font-mono truncate ml-auto"
+          title={
+            ctx > 0
+              ? `Peak context: ${ctx.toLocaleString()} tokens${
+                  histInfo?.contextWindow
+                    ? ` / ${histInfo.contextWindow.toLocaleString()} (${pct}%)`
+                    : ""
+                }`
+              : undefined
+          }
+        >
+          {ctxPart}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** Project picker shown above the input in `NewSessionComposer`. Recent + All
+ *  Projects + native folder dialog. */
+function ProjectPicker({
+  cwd,
+  onCwdChange,
+  projects,
+  recentProjects,
+}: {
+  cwd: string | null;
+  onCwdChange: (path: string) => void;
+  projects: Project[];
+  recentProjects: RecentProjectEntry[];
+}) {
+  const { formatPath } = useAppConfig();
+  const recentPaths = new Set(recentProjects.map((r) => r.path));
+  const otherProjects = projects
+    .filter((p) => !recentPaths.has(p.path))
+    .slice()
+    .sort((a, b) => b.last_active - a.last_active)
+    .slice(0, 10);
+
+  const pickFolder = async () => {
+    const picked = await open({ directory: true, multiple: false });
+    if (typeof picked === "string" && picked.length > 0) onCwdChange(picked);
+  };
+
+  const cwdLabel = cwd ? formatPath(cwd) : "Pick a project folder…";
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-card rounded-md transition-colors min-w-0 max-w-full"
+          title={cwd ?? "Pick a project folder"}
+        >
+          <Folder className="w-3.5 h-3.5 flex-shrink-0" />
+          <span className="truncate font-mono">{cwdLabel}</span>
+          <ChevronDownIcon className="w-3 h-3 flex-shrink-0" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="min-w-[280px] max-w-[420px] p-0">
+        <div className="max-h-[360px] overflow-y-auto p-1">
+          {recentProjects.length > 0 && (
+            <>
+              <div className="px-2 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Recent
+              </div>
+              {recentProjects.map((r) => {
+                const isCurrent = r.path === cwd;
+                return (
+                  <DropdownMenuItem
+                    key={`recent:${r.path}`}
+                    onClick={() => onCwdChange(r.path)}
+                    className={isCurrent ? "bg-primary/10" : ""}
+                  >
+                    <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                      {isCurrent ? (
+                        <CheckIcon className="w-3 h-3 text-primary flex-shrink-0" />
+                      ) : (
+                        <span className="w-3 flex-shrink-0" />
+                      )}
+                      <ProjectLogo projectPath={r.path} size="sm" />
+                      <span className="text-xs truncate flex-1 font-mono" title={r.path}>
+                        {formatPath(r.path)}
+                      </span>
+                    </div>
+                  </DropdownMenuItem>
+                );
+              })}
+            </>
+          )}
+          {otherProjects.length > 0 && (
+            <>
+              {recentProjects.length > 0 && <div className="my-1 border-t border-border" />}
+              <div className="px-2 pt-0.5 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                All projects
+              </div>
+              {otherProjects.map((p) => {
+                const isCurrent = p.path === cwd;
+                return (
+                  <DropdownMenuItem
+                    key={`all:${p.id}`}
+                    onClick={() => onCwdChange(p.path)}
+                    className={isCurrent ? "bg-primary/10" : ""}
+                  >
+                    <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                      {isCurrent ? (
+                        <CheckIcon className="w-3 h-3 text-primary flex-shrink-0" />
+                      ) : (
+                        <span className="w-3 flex-shrink-0" />
+                      )}
+                      <ProjectLogo projectPath={p.path} size="sm" />
+                      <span className="text-xs truncate flex-1 font-mono" title={p.path}>
+                        {formatPath(p.path)}
+                      </span>
+                    </div>
+                  </DropdownMenuItem>
+                );
+              })}
+            </>
+          )}
+          {recentProjects.length === 0 && otherProjects.length === 0 && (
+            <DropdownMenuItem disabled>
+              <span className="text-xs text-muted-foreground">No projects yet</span>
+            </DropdownMenuItem>
+          )}
+        </div>
+        <DropdownMenuSeparator className="m-0" />
+        <div className="p-1">
+          <DropdownMenuItem onClick={pickFolder} className="gap-2">
+            <Folder className="w-3.5 h-3.5 text-muted-foreground" />
+            <span className="text-xs">Pick folder…</span>
+          </DropdownMenuItem>
+        </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/** Shared terminal-style composer used by both `SessionDetail` (resume) and
+ *  the right-panel empty state (new session). The two call sites differ only
+ *  in: (1) the command they build on submit, (2) optional `leading` content
+ *  (project picker for new sessions), and (3) the placeholder text. */
+function Composer({
+  cwd,
+  buildCommand,
+  placeholder,
+  leading,
+  trailing,
+  disabled,
+  emptyMessage,
+  onSpawn,
+  resetKey,
+}: {
+  cwd: string | null;
+  buildCommand: (
+    terminalOpt: TerminalOption,
+    prompt: string,
+  ) => { command?: string; initialInput?: string };
+  placeholder: (terminalOpt: TerminalOption) => string;
+  leading?: React.ReactNode;
+  trailing?: React.ReactNode;
+  disabled?: boolean;
+  /** When set, the composer is replaced by this dashed-border message and no
+   *  input is rendered. Used by `SessionDetail` for non-resumable sessions. */
+  emptyMessage?: React.ReactNode;
+  onSpawn?: (cwd: string) => void;
+  /** Identity that should reset the input + tear down the PTY when it
+   *  changes (e.g. switching between sessions). */
+  resetKey?: string;
+}) {
+  const defaultTerminal = TERMINAL_OPTIONS.find((o) => o.type === "claude") ?? TERMINAL_OPTIONS[0];
+  const [terminalOpt, setTerminalOpt] = useState<TerminalOption>(defaultTerminal);
+  const [input, setInput] = useState("");
+  const composingRef = useRef(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [activePty, setActivePty] = useState<ActivePty | null>(null);
+  const [ptyHeight, setPtyHeight] = useAtom(composerPtyHeightAtom);
+  const dragStateRef = useRef<{ startY: number; startH: number } | null>(null);
+
+  const onResizeStart = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
+    dragStateRef.current = { startY: e.clientY, startH: ptyHeight };
+  };
+  const onResizeMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const s = dragStateRef.current;
+    if (!s) return;
+    const maxH = Math.max(PTY_HEIGHT_MIN, Math.floor(window.innerHeight * 0.8));
+    const next = Math.min(maxH, Math.max(PTY_HEIGHT_MIN, s.startH + (s.startY - e.clientY)));
+    setPtyHeight(next);
+  };
+  const onResizeEnd = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (dragStateRef.current) {
+      try { (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId); } catch {}
+      dragStateRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    setInput("");
+    setActivePty((prev) => {
+      if (prev) {
+        disposeTerminal(prev.ptyId);
+        invoke("pty_kill", { id: prev.ptyId }).catch(() => {});
+        invoke("pty_purge_scrollback", { id: prev.ptyId }).catch(() => {});
+      }
+      return null;
+    });
+  }, [resetKey]);
+
+  const submit = () => {
+    if (disabled || !cwd) return;
+    const prompt = input.trim();
+    const { command, initialInput } = buildCommand(terminalOpt, prompt);
+    setActivePty({ ptyId: crypto.randomUUID(), cwd, command, initialInput });
+    setInput("");
+    onSpawn?.(cwd);
+  };
+
+  const closeActivePty = () => {
+    setActivePty((prev) => {
+      if (prev) {
+        disposeTerminal(prev.ptyId);
+        invoke("pty_kill", { id: prev.ptyId }).catch(() => {});
+        invoke("pty_purge_scrollback", { id: prev.ptyId }).catch(() => {});
+      }
+      return null;
+    });
+  };
+
+  if (emptyMessage) {
+    return (
+      <div className="shrink-0 min-w-0 px-6 pb-1 pt-3 border-t border-border bg-background overflow-hidden">
+        <div className="px-4 py-2.5 border border-dashed border-border rounded-xl bg-card/60 text-xs text-muted-foreground">
+          {emptyMessage}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="shrink-0 min-w-0 px-6 pb-3 pt-3 border-t border-border bg-background overflow-hidden">
+      {activePty ? (
+        <div className="relative border border-border rounded-xl overflow-hidden bg-terminal shadow-sm">
+          <div
+            onPointerDown={onResizeStart}
+            onPointerMove={onResizeMove}
+            onPointerUp={onResizeEnd}
+            onPointerCancel={onResizeEnd}
+            className="absolute inset-x-0 top-0 h-1.5 cursor-ns-resize z-10 hover:bg-primary/40 active:bg-primary/60 transition-colors"
+            title="Drag to resize"
+          />
+          <div className="flex items-center justify-between px-3 py-1.5 border-b border-border bg-card-alt/40">
+            <span className="text-xs text-muted-foreground font-mono truncate">
+              {activePty.command ?? "shell"}
+            </span>
+            <button
+              onClick={closeActivePty}
+              className="p-1 rounded text-muted-foreground hover:bg-card-alt hover:text-ink transition-colors"
+              title="Close terminal"
+            >
+              <Cross2Icon className="w-3.5 h-3.5" />
+            </button>
+          </div>
+          <div style={{ height: ptyHeight }}>
+            <TerminalPane
+              ptyId={activePty.ptyId}
+              cwd={activePty.cwd}
+              command={activePty.command}
+              initialInput={activePty.initialInput}
+              visible
+              autoFocus
+              onExit={closeActivePty}
+            />
+          </div>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {leading && <div className="flex items-center gap-2 px-1">{leading}</div>}
+          <div className="flex items-start gap-2 px-4 py-2.5 border border-border/60 rounded-xl bg-terminal shadow-sm overflow-hidden">
+            <span className="shrink-0 text-sm leading-6 font-mono text-primary/80 select-none">$</span>
+            <textarea
+              ref={textareaRef}
+              rows={1}
+              value={input}
+              onChange={(e) => {
+                setInput(e.target.value);
+                const ta = e.target;
+                ta.style.height = "auto";
+                ta.style.height = `${ta.scrollHeight}px`;
+              }}
+              placeholder={placeholder(terminalOpt)}
+              disabled={disabled || !cwd}
+              className="flex-1 min-w-0 px-0 py-0 bg-transparent resize-none outline-none text-sm leading-6 font-mono text-neutral-100 caret-primary placeholder:text-neutral-500 overflow-hidden disabled:opacity-50"
+              onCompositionStart={() => { composingRef.current = true; }}
+              onCompositionEnd={() => {
+                requestAnimationFrame(() => { composingRef.current = false; });
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Process" || composingRef.current) return;
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  submit();
+                }
+              }}
+            />
+            <span
+              className="pointer-events-none shrink-0 inline-flex items-center h-6 text-neutral-500 select-none"
+              title="Press Enter to send"
+            >
+              <CornerDownLeft className="w-4 h-4" />
+            </span>
+          </div>
+          <div className="flex items-center gap-2 px-1">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-card rounded-md transition-colors">
+                  <DesktopIcon className="w-3.5 h-3.5" />
+                  <span>{terminalOpt.label}</span>
+                  <ChevronDownIcon className="w-3 h-3" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="min-w-[140px]">
+                {TERMINAL_OPTIONS.map((opt) => (
+                  <DropdownMenuItem key={opt.type} onClick={() => setTerminalOpt(opt)}>
+                    <span className={opt.type === terminalOpt.type ? "font-medium" : ""}>
+                      {opt.label}
+                    </span>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+            {trailing}
           </div>
         </div>
       )}
-      {canResume && (
-        <div className="shrink-0 min-w-0 px-6 pb-1 pt-3 border-t border-border bg-background overflow-hidden">
-          {activePty ? (
-            <div className="border border-border rounded-xl overflow-hidden bg-terminal shadow-sm">
-              <div className="flex items-center justify-between px-3 py-1.5 border-b border-border bg-card-alt/40">
-                <span className="text-xs text-muted-foreground font-mono truncate">
-                  {activePty.command ?? "shell"}
-                </span>
-                <button
-                  onClick={closeActivePty}
-                  className="p-1 rounded text-muted-foreground hover:bg-card-alt hover:text-ink transition-colors"
-                  title="Close terminal"
-                >
-                  <Cross2Icon className="w-3.5 h-3.5" />
-                </button>
-              </div>
-              <div className="h-72">
-                <TerminalPane
-                  ptyId={activePty.ptyId}
-                  cwd={activePty.cwd}
-                  command={activePty.command}
-                  initialInput={activePty.initialInput}
-                  visible
-                  autoFocus
-                  onExit={closeActivePty}
-                />
-              </div>
-            </div>
-          ) : (
-            <div className="flex flex-col gap-2">
-              <div className="flex items-start gap-2 px-4 py-2.5 border border-border/60 rounded-xl bg-terminal shadow-sm overflow-hidden">
-                <span className="shrink-0 text-sm leading-6 font-mono text-primary/80 select-none">$</span>
-                <textarea
-                  ref={resumeTextareaRef}
-                  rows={1}
-                  value={resumeInput}
-                  onChange={(e) => {
-                    setResumeInput(e.target.value);
-                    const ta = e.target;
-                    ta.style.height = "auto";
-                    ta.style.height = `${ta.scrollHeight}px`;
-                  }}
-                  placeholder={
-                    terminalOpt.type === "terminal"
-                      ? "Open a shell in this project (Enter to start)"
-                      : `Continue this conversation with ${terminalOpt.label}...`
-                  }
-                  className="flex-1 min-w-0 px-0 py-0 bg-transparent resize-none outline-none text-sm leading-6 font-mono text-neutral-100 caret-primary placeholder:text-neutral-500 overflow-hidden"
-                  onCompositionStart={() => { composingRef.current = true; }}
-                  onCompositionEnd={() => {
-                    requestAnimationFrame(() => { composingRef.current = false; });
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Process" || composingRef.current) return;
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      submitResume();
-                    }
-                  }}
-                />
-                <span
-                  className="pointer-events-none shrink-0 inline-flex items-center h-6 text-neutral-500 select-none"
-                  title="Press Enter to send"
-                >
-                  <CornerDownLeft className="w-4 h-4" />
-                </span>
-              </div>
-              <div className="flex items-center gap-2 px-1">
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <button className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-card rounded-md transition-colors">
-                      <DesktopIcon className="w-3.5 h-3.5" />
-                      <span>{terminalOpt.label}</span>
-                      <ChevronDownIcon className="w-3 h-3" />
-                    </button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="start" className="min-w-[140px]">
-                    {TERMINAL_OPTIONS.map((opt) => (
-                      <DropdownMenuItem
-                        key={opt.type}
-                        onClick={() => setTerminalOpt(opt)}
-                      >
-                        <span className={opt.type === terminalOpt.type ? "font-medium" : ""}>
-                          {opt.label}
-                        </span>
-                      </DropdownMenuItem>
-                    ))}
-                  </DropdownMenuContent>
-                </DropdownMenu>
-                {(() => {
-                  const histInfo = inferModelInfo(usage?.model);
-                  const ctx = usage?.context_tokens ?? 0;
-                  const pct =
-                    histInfo?.contextWindow && ctx > 0
-                      ? Math.min(100, Math.round((ctx / histInfo.contextWindow) * 100))
-                      : null;
-                  const ctxPart =
-                    ctx > 0 ? `ctx ${formatTokens(ctx)}${pct !== null ? ` (${pct}%)` : ""}` : null;
-
-                  const usableProviders = maasRegistry.filter((p) => {
-                    if (COMING_SOON_PROVIDER_KEYS.has(p.key)) return false;
-                    const hasAuth =
-                      p.key === "anthropic-subscription" || p.authToken.trim().length > 0;
-                    return hasAuth && p.models.length > 0;
-                  });
-
-                  const providerLabel = activeProvider
-                    ? activeProvider.label || activeProvider.key
-                    : "Select platform";
-                  const modelLabel = activeModel
-                    ? activeModel.displayName
-                    : activeProvider
-                      ? "Select model"
-                      : "—";
-
-                  return (
-                    <div className="flex items-center gap-1.5 min-w-0 flex-1">
-                      {/* Model first (primary choice), platform second — visual order reversed */}
-                      <div className="flex flex-row-reverse items-center gap-1.5">
-                      {/* Platform / MaaS provider */}
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <button
-                            className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-card rounded-md transition-colors min-w-0"
-                            title={
-                              activeProvider
-                                ? `Platform: ${activeProvider.label || activeProvider.key}`
-                                : "No platform selected. Click to pick one."
-                            }
-                          >
-                            <RocketIcon className="w-3.5 h-3.5 flex-shrink-0" />
-                            <span className="truncate">{providerLabel}</span>
-                            <ChevronDownIcon className="w-3 h-3 flex-shrink-0" />
-                          </button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end" className="min-w-[220px] max-w-[320px] p-0">
-                          <div className="max-h-[360px] overflow-y-auto p-1">
-                            {usableProviders.length === 0 ? (
-                              <DropdownMenuItem disabled>
-                                <span className="text-xs text-muted-foreground">
-                                  No providers ready. Open Settings → MaaS Registry.
-                                </span>
-                              </DropdownMenuItem>
-                            ) : (
-                              usableProviders.map((p) => {
-                                const isCurrent = p.key === activeProviderKey;
-                                return (
-                                  <DropdownMenuItem
-                                    key={p.key}
-                                    onClick={() => switchActiveProvider(p)}
-                                    className={isCurrent ? "bg-primary/10" : ""}
-                                  >
-                                    <div className="flex items-center gap-1.5 min-w-0 flex-1">
-                                      {isCurrent ? (
-                                        <CheckIcon className="w-3 h-3 text-primary flex-shrink-0" />
-                                      ) : (
-                                        <span className="w-3 flex-shrink-0" />
-                                      )}
-                                      <span className="text-xs font-medium truncate flex-1">
-                                        {p.label || p.key}
-                                      </span>
-                                      <span className="text-[10px] text-muted-foreground flex-shrink-0">
-                                        {p.models.length} model{p.models.length === 1 ? "" : "s"}
-                                      </span>
-                                    </div>
-                                  </DropdownMenuItem>
-                                );
-                              })
-                            )}
-                          </div>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-
-                      <span className="text-xs text-muted-foreground/60 flex-shrink-0">/</span>
-
-                      {/* Model (scoped to active provider) */}
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <button
-                            disabled={!activeProvider}
-                            className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-card rounded-md transition-colors min-w-0 disabled:opacity-50 disabled:cursor-not-allowed"
-                            title={
-                              activeModel
-                                ? `Model: ${activeModel.modelName}${
-                                    activeVendor ? `\nVendor: ${activeVendor.name}` : ""
-                                  }`
-                                : activeProvider
-                                  ? "Pick a model for this platform"
-                                  : "Select a platform first"
-                            }
-                          >
-                            <span className="truncate">{modelLabel}</span>
-                            <ChevronDownIcon className="w-3 h-3 flex-shrink-0" />
-                          </button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent
-                          align="end"
-                          className="min-w-[260px] max-w-[380px] p-0"
-                          onCloseAutoFocus={() => setModelSearch("")}
-                        >
-                          {activeProvider && activeProvider.models.length > 0 && (
-                            <div className="p-1.5 border-b border-border">
-                              <input
-                                type="text"
-                                autoFocus
-                                value={modelSearch}
-                                onChange={(e) => setModelSearch(e.target.value)}
-                                placeholder="Search id, name, vendor..."
-                                spellCheck={false}
-                                // Prevent Radix's built-in typeahead from intercepting keys
-                                onKeyDown={(e) => {
-                                  if (e.key !== "Escape" && e.key !== "Enter" && e.key !== "Tab") {
-                                    e.stopPropagation();
-                                  }
-                                }}
-                                className="w-full h-7 px-2 text-xs rounded bg-background border border-input focus:outline-none focus:ring-1 focus:ring-ring"
-                              />
-                            </div>
-                          )}
-                          <div className="max-h-[360px] overflow-y-auto p-1">
-                            {!activeProvider ? (
-                              <DropdownMenuItem disabled>
-                                <span className="text-xs text-muted-foreground">
-                                  Pick a platform first
-                                </span>
-                              </DropdownMenuItem>
-                            ) : activeProvider.models.length === 0 ? (
-                              <DropdownMenuItem disabled>
-                                <span className="text-xs text-muted-foreground">
-                                  This platform has no models. Open Settings → MaaS Registry.
-                                </span>
-                              </DropdownMenuItem>
-                            ) : (() => {
-                              const q = modelSearch.trim().toLowerCase();
-                              const sorted = activeProvider.models
-                                .slice()
-                                .sort((a, b) => a.modelName.localeCompare(b.modelName));
-
-                              const renderItem = (m: import("../../types").MaasModel, keyPrefix = "") => {
-                                const vendor = m.vendor
-                                  ? activeProvider.vendors?.find((v) => v.id === m.vendor) ?? null
-                                  : null;
-                                const isCurrent = m.modelName === activeModelName;
-                                return (
-                                  <DropdownMenuItem
-                                    key={`${keyPrefix}${m.id}`}
-                                    onClick={() => switchActiveModel(activeProvider, m.modelName)}
-                                    className={isCurrent ? "bg-primary/10" : ""}
-                                  >
-                                    <div className="flex flex-col gap-0.5 min-w-0 flex-1">
-                                      <div className="flex items-center gap-1.5">
-                                        {isCurrent ? (
-                                          <CheckIcon className="w-3 h-3 text-primary flex-shrink-0" />
-                                        ) : (
-                                          <span className="w-3 flex-shrink-0" />
-                                        )}
-                                        <span className="text-xs font-medium truncate">
-                                          {m.displayName}
-                                        </span>
-                                        {vendor && (
-                                          <span className="text-[10px] text-muted-foreground truncate">
-                                            {vendor.name}
-                                          </span>
-                                        )}
-                                      </div>
-                                      <span className="text-[10px] text-muted-foreground font-mono truncate pl-4">
-                                        {m.modelName}
-                                      </span>
-                                    </div>
-                                  </DropdownMenuItem>
-                                );
-                              };
-
-                              // Searching: filter the full list, skip Recent section
-                              if (q) {
-                                const filtered = sorted.filter((m) => {
-                                  const vendorName = m.vendor
-                                    ? activeProvider.vendors?.find((v) => v.id === m.vendor)?.name ?? m.vendor
-                                    : "";
-                                  return (
-                                    m.id.toLowerCase().includes(q) ||
-                                    m.displayName.toLowerCase().includes(q) ||
-                                    m.modelName.toLowerCase().includes(q) ||
-                                    vendorName.toLowerCase().includes(q)
-                                  );
-                                });
-                                if (filtered.length === 0) {
-                                  return (
-                                    <div className="px-2 py-3 text-center text-xs text-muted-foreground">
-                                      No models match "{modelSearch}"
-                                    </div>
-                                  );
-                                }
-                                return filtered.map((m) => renderItem(m));
-                              }
-
-                              // Not searching: Recent section (current provider's recent picks) + All
-                              const recentForProvider = recentModels
-                                .filter((r) => r.providerKey === activeProvider.key)
-                                .map((r) => activeProvider.models.find((m) => m.modelName === r.modelName))
-                                .filter((m): m is import("../../types").MaasModel => !!m);
-
-                              return (
-                                <>
-                                  {recentForProvider.length > 0 && (
-                                    <>
-                                      <div className="px-2 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                                        Recent
-                                      </div>
-                                      {recentForProvider.map((m) => renderItem(m, "recent:"))}
-                                      <div className="my-1 border-t border-border" />
-                                      <div className="px-2 pt-0.5 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                                        All Models
-                                      </div>
-                                    </>
-                                  )}
-                                  {sorted.map((m) => renderItem(m, "all:"))}
-                                </>
-                              );
-                            })()}
-                          </div>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                      </div>
-
-                      {ctxPart && (
-                        <span
-                          className="text-[10px] text-muted-foreground font-mono truncate ml-auto"
-                          title={
-                            ctx > 0
-                              ? `Peak context: ${ctx.toLocaleString()} tokens${
-                                  histInfo?.contextWindow
-                                    ? ` / ${histInfo.contextWindow.toLocaleString()} (${pct}%)`
-                                    : ""
-                                }`
-                              : undefined
-                          }
-                        >
-                          {ctxPart}
-                        </span>
-                      )}
-                    </div>
-                  );
-                })()}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
     </div>
+  );
+}
+
+// ============================================================================
+// New-session composer: thin wrapper around <Composer> for the empty state
+// ============================================================================
+
+function NewSessionComposer({
+  cwd,
+  onCwdChange,
+  projects,
+  recentProjects,
+  onSpawn,
+}: {
+  cwd: string | null;
+  onCwdChange: (path: string) => void;
+  projects: Project[];
+  recentProjects: RecentProjectEntry[];
+  onSpawn: (path: string) => void;
+}) {
+  const { formatPath } = useAppConfig();
+  const selection = useMaasActiveSelection();
+
+  return (
+    <Composer
+      cwd={cwd}
+      resetKey={cwd ?? "no-cwd"}
+      onSpawn={onSpawn}
+      placeholder={(t) =>
+        !cwd
+          ? "Pick a project folder to start"
+          : t.type === "terminal"
+            ? `Open a shell in ${formatPath(cwd)} (Enter to start)`
+            : `Start a new ${t.label} session in ${formatPath(cwd)}...`
+      }
+      buildCommand={(t, prompt) => {
+        if (t.type === "terminal") return { initialInput: prompt || undefined };
+        return { command: buildAgentCommand(t.type, prompt) };
+      }}
+      leading={
+        <ProjectPicker
+          cwd={cwd}
+          onCwdChange={onCwdChange}
+          projects={projects}
+          recentProjects={recentProjects}
+        />
+      }
+      trailing={<PlatformModelPicker selection={selection} />}
+    />
   );
 }

@@ -190,6 +190,21 @@ pub struct Session {
     pub project_path: Option<String>,
     pub title: Option<String>,
     pub summary: Option<String>,
+    /// Last user-typed prompt (Claude Code's `lastPrompt`). Used as a
+    /// last-resort label when no title/summary exists. Never substituted
+    /// into `title` or `summary` — kept as a separate field so the UI can
+    /// display it with a distinct visual treatment.
+    #[serde(default)]
+    pub last_prompt: Option<String>,
+    /// Where `title`/fallback came from when the UI renders a label.
+    /// Values: "custom" | "ai" | "slug" | "summary" | "prompt" | "none"
+    #[serde(default)]
+    pub title_source: Option<String>,
+    /// User-initiated conversation rounds (one per user message).
+    pub rounds: usize,
+    /// Total transcript messages (user + assistant turns). An assistant may
+    /// emit several messages per round (thinking, tool-use, reply), so this
+    /// is strictly >= rounds.
     pub message_count: usize,
     pub created_at: u64,
     pub last_modified: u64,
@@ -813,6 +828,9 @@ async fn list_sessions(project_id: String) -> Result<Vec<Session>, String> {
                     project_path: None,
                     title: head.title,
                     summary: head.summary,
+                    last_prompt: head.last_prompt,
+                    title_source: head.title_source,
+                    rounds: head.rounds,
                     message_count: head.message_count,
                     created_at,
                     last_modified,
@@ -948,10 +966,148 @@ async fn get_sessions_usage(project_id: String) -> Result<Vec<SessionUsageEntry>
 
 /// Session head info parsed from first N lines
 struct SessionHead {
+    /// User-set or AI-generated title (Claude Code's `customTitle` / `aiTitle`),
+    /// or fallback derived from `slug`. This is the human-recognizable session
+    /// label — what Claude Code itself shows in its session picker.
     title: Option<String>,
+    /// `/compact` summary (Claude Code's `{type:"summary", summary, leafUuid}`).
+    /// Independent from `title` — sessions can have a summary without a title.
     summary: Option<String>,
+    /// Most-recent user prompt (Claude Code's re-appended `lastPrompt`).
+    /// Used by the UI as a last-resort label when no title/summary exists.
+    last_prompt: Option<String>,
     cwd: Option<String>,
+    rounds: usize,
     message_count: usize,
+    /// Which field `title` came from: "custom" | "ai" | "slug" | None.
+    title_source: Option<String>,
+}
+
+/// Window size for head/tail metadata scans, mirroring Claude Code's
+/// `LITE_READ_BUF_SIZE`. Metadata entries (custom-title, ai-title, summary,
+/// last-prompt) are guaranteed by the writer to land within these windows
+/// (head for stable fields like cwd/slug, tail for re-appended title/summary).
+const LITE_READ_BUF: u64 = 65536;
+
+/// Extract the value of `"<key>":"<value>"` (last occurrence wins) from a JSONL
+/// chunk via byte-level scan. Mirrors Claude Code's `extractLastJsonStringField`.
+///
+/// Operates entirely on bytes (memchr-style) to stay safe on inputs containing
+/// non-UTF-8 noise or characters that don't align with naive str-indexing.
+/// Returns the unescaped string, or None if the key is absent / malformed.
+fn extract_last_json_string_field(text: &str, key: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut last: Option<String> = None;
+
+    let mut try_pattern = |pat: &[u8]| {
+        let mut from = 0usize;
+        while from + pat.len() <= bytes.len() {
+            // Naive substring search — chunks here are 64KB, plenty fast.
+            let Some(rel) = bytes[from..]
+                .windows(pat.len())
+                .position(|w| w == pat)
+            else { break };
+            let value_start = from + rel + pat.len();
+            // Walk the JSON string body, honoring backslash escapes, until
+            // the closing quote.
+            let mut i = value_start;
+            let mut closed_at: Option<usize> = None;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'\\' if i + 1 < bytes.len() => { i += 2; }
+                    b'"' => { closed_at = Some(i); break; }
+                    _ => { i += 1; }
+                }
+            }
+            let Some(end) = closed_at else { break };
+            // Decode the raw value as lossy UTF-8 (non-UTF-8 bytes become
+            // U+FFFD), then unescape common JSON escapes.
+            let raw = String::from_utf8_lossy(&bytes[value_start..end]);
+            let mut out = String::with_capacity(raw.len());
+            let mut chars = raw.chars();
+            while let Some(c) = chars.next() {
+                if c == '\\' {
+                    match chars.next() {
+                        Some('n') => out.push('\n'),
+                        Some('r') => out.push('\r'),
+                        Some('t') => out.push('\t'),
+                        Some('"') => out.push('"'),
+                        Some('\\') => out.push('\\'),
+                        Some('/') => out.push('/'),
+                        Some('u') => {
+                            // Skip 4 hex digits — we don't bother decoding
+                            // \uXXXX since title/summary are plain text.
+                            for _ in 0..4 { let _ = chars.next(); }
+                            out.push('\u{FFFD}');
+                        }
+                        Some(other) => { out.push('\\'); out.push(other); }
+                        None => out.push('\\'),
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            last = Some(out);
+            from = end + 1;
+        }
+    };
+
+    try_pattern(format!("\"{}\":\"", key).as_bytes());
+    try_pattern(format!("\"{}\": \"", key).as_bytes());
+    last
+}
+
+/// Read the first and last `LITE_READ_BUF` bytes of a file as UTF-8 strings.
+/// On overlap (small files) returns the same chunk for both. Lossy decode so
+/// non-UTF-8 noise doesn't abort the scan.
+fn read_head_tail(path: &Path) -> std::io::Result<(String, String)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    let head_len = std::cmp::min(LITE_READ_BUF, size) as usize;
+    let mut head_buf = vec![0u8; head_len];
+    file.read_exact(&mut head_buf)?;
+    let head = String::from_utf8_lossy(&head_buf).into_owned();
+    if size <= LITE_READ_BUF {
+        return Ok((head.clone(), head));
+    }
+    let tail_offset = size - LITE_READ_BUF;
+    file.seek(SeekFrom::Start(tail_offset))?;
+    let mut tail_buf = vec![0u8; LITE_READ_BUF as usize];
+    file.read_exact(&mut tail_buf)?;
+    let tail = String::from_utf8_lossy(&tail_buf).into_owned();
+    Ok((head, tail))
+}
+
+/// Count user-initiated rounds and total messages by streaming the whole file
+/// with cheap substring matching (no JSON parse). This is the only operation
+/// that touches every line — it's separated from metadata extraction so we
+/// can skip it on hot paths if the caller doesn't need exact counts.
+fn count_rounds_and_messages(path: &Path) -> (usize, usize) {
+    use std::io::{BufRead, BufReader};
+    let file = match fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return (0, 0),
+    };
+    let reader = BufReader::new(file);
+    let mut rounds = 0usize;
+    let mut messages = 0usize;
+    for line in reader.lines().map_while(Result::ok) {
+        if line.contains("\"type\":\"user\"") {
+            rounds += 1;
+            messages += 1;
+        } else if line.contains("\"type\":\"assistant\"") {
+            messages += 1;
+        } else if line.contains("\"type\":\"message\"") {
+            if line.contains("\"role\":\"user\"") {
+                rounds += 1;
+                messages += 1;
+            } else if line.contains("\"role\":\"assistant\"") {
+                messages += 1;
+            }
+        }
+    }
+    (rounds, messages)
 }
 
 /// Convert slug like "soft-petting-wave" to "Soft Petting Wave"
@@ -968,132 +1124,78 @@ fn slug_to_title(slug: &str) -> String {
         .join(" ")
 }
 
-/// Count user+assistant messages by streaming the whole file.
-/// Cheap: only parses the `type` field via a tiny regex-free string check.
+
+/// Read session metadata using Claude Code's lite-read protocol:
+/// scan only the first and last ~64KB of the jsonl. Stable fields (cwd, slug,
+/// first-prompt) live in the head; volatile / re-appended fields (customTitle,
+/// aiTitle, summary, lastPrompt) live in the tail.
 ///
-/// Two on-disk formats need to be supported:
-/// - Legacy CLI: top-level `"type":"user"` / `"type":"assistant"`
-/// - Claude desktop app (Code 栏): top-level `"type":"user"` / `"type":"message"`,
-///   where assistant turns are wrapped as `{"type":"message","message":{"role":"assistant",...}}`.
-fn count_session_messages(path: &Path) -> usize {
-    use std::io::{BufRead, BufReader};
-    let file = match fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return 0,
+/// Why not full-file scan: session jsonl can be tens of MB; iterating every
+/// line with JSON parse is the bottleneck of `list_all_sessions` (called for
+/// hundreds of files at once). Claude Code's writers guarantee tail re-append
+/// for `customTitle`/`tag`/`lastPrompt`; `aiTitle` is written once and may
+/// scroll out of tail in long sessions, so we also check head.
+///
+/// `_max_lines` is retained for source-compat with older callers; ignored.
+fn read_session_head(path: &Path, _max_lines: usize) -> SessionHead {
+    let empty = SessionHead {
+        title: None, summary: None, last_prompt: None,
+        cwd: None, rounds: 0, message_count: 0, title_source: None,
     };
-    let reader = BufReader::new(file);
-    let mut count = 0;
-    for line in reader.lines().map_while(Result::ok) {
-        if line.contains("\"type\":\"user\"") || line.contains("\"type\":\"assistant\"") {
-            count += 1;
-        } else if line.contains("\"type\":\"message\"") && line.contains("\"role\":\"assistant\"") {
-            count += 1;
-        }
-    }
-    count
+    let (head, tail) = match read_head_tail(path) {
+        Ok(ht) => ht,
+        Err(_) => return empty,
+    };
+
+    let cwd = extract_last_json_string_field(&head, "cwd")
+        .filter(|s| !s.is_empty());
+    let slug = extract_last_json_string_field(&head, "slug")
+        .filter(|s| !s.is_empty());
+
+    // Title precedence (matches Claude Code's readLiteMetadata):
+    //   customTitle (tail) > customTitle (head) > aiTitle (tail) > aiTitle (head)
+    // Tracks which source supplied the title so the UI can badge it.
+    let nonempty = |s: String| if s.trim().is_empty() { None } else { Some(s) };
+    let (title, title_source) = if let Some(s) = extract_last_json_string_field(&tail, "customTitle").and_then(nonempty)
+        .or_else(|| extract_last_json_string_field(&head, "customTitle").and_then(nonempty))
+    {
+        (Some(s), Some("custom".to_string()))
+    } else if let Some(s) = extract_last_json_string_field(&tail, "aiTitle").and_then(nonempty)
+        .or_else(|| extract_last_json_string_field(&head, "aiTitle").and_then(nonempty))
+    {
+        (Some(s), Some("ai".to_string()))
+    } else if let Some(s) = slug.as_deref().map(slug_to_title) {
+        (Some(s), Some("slug".to_string()))
+    } else {
+        (None, None)
+    };
+
+    // /compact summary lives in the tail (latest leaf wins by virtue of
+    // last-occurrence semantics in extract_last_json_string_field).
+    let summary = extract_last_json_string_field(&tail, "summary")
+        .filter(|s| !s.trim().is_empty());
+
+    // lastPrompt is re-appended by Claude Code on every resume, so the latest
+    // copy is in the tail. Strip our internal command/caveat markup so the UI
+    // can render it cleanly as a fallback label.
+    let last_prompt = extract_last_json_string_field(&tail, "lastPrompt")
+        .map(|s| strip_local_command_tags(&restore_slash_command(&s)).trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let (rounds, messages) = count_rounds_and_messages(path);
+    SessionHead { title, summary, last_prompt, cwd, rounds, message_count: messages, title_source }
 }
 
-/// Read only the first N lines of a session file to get summary (much faster than reading entire file)
-fn read_session_head(path: &Path, max_lines: usize) -> SessionHead {
-    use std::io::{BufRead, BufReader};
-
-    let file = match fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return SessionHead { title: None, summary: None, cwd: None, message_count: 0 },
-    };
-
-    let reader = BufReader::new(file);
-    let mut summary = None;
-    let mut slug: Option<String> = None;
-    let mut cwd: Option<String> = None;
-    let mut first_user_message: Option<String> = None;
-    let mut message_count = 0;
-
-    for line in reader.lines().take(max_lines) {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-        if let Ok(parsed) = serde_json::from_str::<RawLine>(&line) {
-            // Capture slug from any line that has it
-            if slug.is_none() {
-                if let Some(s) = &parsed.slug {
-                    if !s.is_empty() {
-                        slug = Some(s.clone());
-                    }
-                }
-            }
-            if parsed.line_type.as_deref() == Some("summary") {
-                summary = parsed.summary;
-            }
-            if parsed.line_type.as_deref() == Some("user") {
-                message_count += 1;
-                // Capture cwd from first user message
-                if cwd.is_none() {
-                    if let Some(c) = &parsed.cwd {
-                        if !c.is_empty() {
-                            cwd = Some(c.clone());
-                        }
-                    }
-                }
-                // Capture first user message as fallback summary
-                if first_user_message.is_none() {
-                    if let Some(msg) = &parsed.message {
-                        if let Some(content) = &msg.content {
-                            // Extract text from content (can be string or array)
-                            let text_content = match content {
-                                serde_json::Value::String(s) => Some(s.clone()),
-                                serde_json::Value::Array(arr) => {
-                                    // Find first text block
-                                    arr.iter().find_map(|item| {
-                                        if item.get("type").and_then(|t| t.as_str()) == Some("text") {
-                                            item.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                }
-                                _ => None,
-                            };
-                            if let Some(text) = text_content {
-                                let restored = restore_slash_command(&text);
-                                let display = if restored.chars().count() > 80 {
-                                    format!("{}...", restored.chars().take(80).collect::<String>())
-                                } else {
-                                    restored
-                                };
-                                first_user_message = Some(display);
-                            }
-                        }
-                    }
-                }
-            }
-            if parsed.line_type.as_deref() == Some("assistant") {
-                message_count += 1;
-            }
-            // Claude desktop app format wraps assistant turns as type=message + role=assistant
-            if parsed.line_type.as_deref() == Some("message") {
-                if let Some(msg) = &parsed.message {
-                    if msg.role.as_deref() == Some("assistant") || msg.role.as_deref() == Some("user") {
-                        message_count += 1;
-                    }
-                }
-            }
-        }
+/// Strip Claude Code internal `<local-command-{caveat,stdout,stderr}>...</...>` blocks.
+/// These are auto-injected on session start / command execution and are not user content.
+fn strip_local_command_tags(content: &str) -> String {
+    use regex::Regex;
+    lazy_static::lazy_static! {
+        static ref LOCAL_RE: Regex = Regex::new(
+            r"(?s)<local-command-(?:caveat|stdout|stderr)>.*?</local-command-(?:caveat|stdout|stderr)>"
+        ).unwrap();
     }
-
-    let title = slug.map(|s| slug_to_title(&s));
-    let final_summary = summary.or(first_user_message).map(|s| restore_slash_command(&s));
-
-    // The head sample (first N lines) only sees messages in the front of the
-    // file. For accurate counts (esp. for sessions where the head is filled
-    // with non-message entries like queue-operation/summary/hook events), do
-    // one cheap streaming pass over the whole file. This is fast — we only
-    // substring-match `"type":"user|assistant"` per line, no JSON parse.
-    let _ = message_count;
-    let message_count = count_session_messages(path);
-
-    SessionHead { title, summary: final_summary, cwd, message_count }
+    LOCAL_RE.replace_all(content, "").to_string()
 }
 
 /// Convert <command-message>...</command-message><command-name>/cmd</command-name> to /cmd format
@@ -1158,12 +1260,26 @@ fn build_session_index_from_history() -> HashMap<(String, String), (u64, Option<
                 (entry.session_id, entry.project, entry.timestamp)
             {
                 let project_id = encode_project_path(&project);
-                // Keep the latest timestamp and display for each session
+                // Keep both the latest timestamp (for sort order) and the latest
+                // *non-command* display (for the session label). Command-only entries
+                // like "/clear" are preserved only when no real prompt exists yet.
+                let is_useful_display = entry
+                    .display
+                    .as_deref()
+                    .map(|s| {
+                        let trimmed = s.trim();
+                        !trimmed.is_empty() && !trimmed.starts_with('/')
+                    })
+                    .unwrap_or(false);
                 index
                     .entry((project_id, session_id))
                     .and_modify(|(ts, disp)| {
                         if timestamp > *ts {
                             *ts = timestamp;
+                        }
+                        if is_useful_display {
+                            *disp = entry.display.clone();
+                        } else if disp.is_none() {
                             *disp = entry.display.clone();
                         }
                     })
@@ -1192,7 +1308,7 @@ async fn list_all_sessions() -> Result<Vec<Session>, String> {
             std::collections::HashSet::new();
 
         // First pass: use history index for sessions with sessionId
-        for ((project_id, session_id), (timestamp, display)) in &history_index {
+        for ((project_id, session_id), (timestamp, _display)) in &history_index {
             let session_path = projects_dir
                 .join(project_id)
                 .join(format!("{}.jsonl", session_id));
@@ -1204,9 +1320,10 @@ async fn list_all_sessions() -> Result<Vec<Session>, String> {
             seen_sessions.insert((project_id.clone(), session_id.clone()));
 
             let head = read_session_head(&session_path, 20);
-
-            // Use display as fallback summary
-            let final_summary = head.summary.or_else(|| display.clone().map(|d| restore_slash_command(&d)));
+            // Only use the genuine `type:"summary"` line emitted by Claude Code
+            // (written on /compact or session close). No fallback to user prompts —
+            // the frontend renders a placeholder when this is None.
+            let final_summary = head.summary;
 
             let metadata = fs::metadata(&session_path).ok();
             let last_modified = metadata.as_ref()
@@ -1228,6 +1345,9 @@ async fn list_all_sessions() -> Result<Vec<Session>, String> {
                 project_path: Some(display_path),
                 title: head.title,
                 summary: final_summary,
+                last_prompt: head.last_prompt,
+                title_source: head.title_source,
+                rounds: head.rounds,
                 message_count: head.message_count,
                 created_at,
                 last_modified,
@@ -1283,6 +1403,9 @@ async fn list_all_sessions() -> Result<Vec<Session>, String> {
                         project_path: Some(session_path),
                         title: head.title,
                         summary: head.summary,
+                        last_prompt: head.last_prompt,
+                        title_source: head.title_source,
+                        rounds: head.rounds,
                         message_count: head.message_count,
                         created_at,
                         last_modified,
@@ -1358,9 +1481,9 @@ async fn list_all_sessions() -> Result<Vec<Session>, String> {
                                 continue;
                             }
 
-                            // Find the CLI .jsonl to get message_count
+                            // Find the CLI .jsonl to get rounds / message_count
                             let jsonl_path = projects_dir.join(&project_id).join(&jsonl_filename);
-                            let (message_count, jsonl_modified, jsonl_created) = if jsonl_path.exists() {
+                            let (rounds, message_count, jsonl_modified, jsonl_created) = if jsonl_path.exists() {
                                 let head = read_session_head(&jsonl_path, 20);
                                 let metadata = fs::metadata(&jsonl_path).ok();
                                 let modified = metadata.as_ref()
@@ -1373,9 +1496,9 @@ async fn list_all_sessions() -> Result<Vec<Session>, String> {
                                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                                     .map(|d| d.as_secs())
                                     .unwrap_or(modified);
-                                (head.message_count, modified, created)
+                                (head.rounds, head.message_count, modified, created)
                             } else {
-                                (0, 0, 0)
+                                (0, 0, 0, 0)
                             };
 
                             let last_activity_ms = meta.get("lastActivityAt").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -1385,6 +1508,7 @@ async fn list_all_sessions() -> Result<Vec<Session>, String> {
                             };
 
                             let title = meta.get("title").and_then(|v| v.as_str()).map(|t| t.to_string());
+                            let title_source = if title.is_some() { Some("custom".to_string()) } else { None };
 
                             seen_sessions.insert((project_id.clone(), cli_session_id.clone()));
                             all_sessions.push(Session {
@@ -1393,6 +1517,9 @@ async fn list_all_sessions() -> Result<Vec<Session>, String> {
                                 project_path: Some(cwd),
                                 title,
                                 summary: None,
+                                last_prompt: None,
+                                title_source,
+                                rounds,
                                 message_count,
                                 created_at,
                                 last_modified,
@@ -1419,12 +1546,12 @@ async fn list_all_sessions() -> Result<Vec<Session>, String> {
         // from multiple passes if its project path encodes inconsistently
         // (e.g. CLI uses a different lossy encoding than ours for non-ASCII
         // cwds). When duplicates appear, keep the entry with the most
-        // complete data (highest message_count, prefer source=app for title).
+        // complete data (highest rounds, prefer source=app for title).
         let mut by_id: std::collections::HashMap<String, Session> = std::collections::HashMap::new();
         for s in all_sessions.into_iter() {
             match by_id.get(&s.id) {
                 Some(existing) => {
-                    let take_new = s.message_count > existing.message_count
+                    let take_new = s.rounds > existing.rounds
                         || (s.source.starts_with("app") && !existing.source.starts_with("app"));
                     if take_new {
                         let merged = Session {
@@ -3562,6 +3689,9 @@ fn find_session_project(session_id: String) -> Result<Option<Session>, String> {
                 project_path: Some(display_path),
                 title: None,
                 summary,
+                last_prompt: None,
+                title_source: None,
+                rounds: 0,
                 message_count: 0,
                 created_at: 0,
                 last_modified: 0,
@@ -5661,6 +5791,47 @@ fn get_session_summary(project_id: String, session_id: String) -> Result<Option<
     }
     let head = read_session_head(&path, 20);
     Ok(head.summary)
+}
+
+/// Update the session title in the Claude desktop app's meta file.
+/// Walks ~/Library/Application Support/Claude/claude-code-sessions/*/*/local_*.json
+/// and rewrites the entry whose `cliSessionId` matches.
+/// Returns an error if the session has no app-code meta (i.e. pure CLI session).
+#[tauri::command]
+fn set_session_title(session_id: String, title: String) -> Result<(), String> {
+    let home = dirs::home_dir().ok_or_else(|| "Cannot get home dir".to_string())?;
+    let root = home
+        .join("Library")
+        .join("Application Support")
+        .join("Claude")
+        .join("claude-code-sessions");
+    if !root.exists() {
+        return Err("Claude app session store not found".to_string());
+    }
+    for device in fs::read_dir(&root).map_err(|e| e.to_string())?.flatten() {
+        for account in fs::read_dir(device.path()).into_iter().flatten().flatten() {
+            for file in fs::read_dir(account.path()).into_iter().flatten().flatten() {
+                let path = file.path();
+                let fname = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                if !fname.starts_with("local_") || !fname.ends_with(".json") {
+                    continue;
+                }
+                let Ok(content) = fs::read_to_string(&path) else { continue };
+                let Ok(mut meta) = serde_json::from_str::<serde_json::Value>(&content) else { continue };
+                if meta.get("cliSessionId").and_then(|v| v.as_str()) != Some(&session_id) {
+                    continue;
+                }
+                if let Some(obj) = meta.as_object_mut() {
+                    obj.insert("title".into(), serde_json::Value::String(title.clone()));
+                    obj.insert("titleSource".into(), serde_json::Value::String("user".into()));
+                }
+                let serialized = serde_json::to_string_pretty(&meta).map_err(|e| e.to_string())?;
+                fs::write(&path, serialized).map_err(|e| e.to_string())?;
+                return Ok(());
+            }
+        }
+    }
+    Err("Session meta not found (only Claude app sessions can be renamed)".to_string())
 }
 
 #[tauri::command]
@@ -9095,6 +9266,53 @@ fn activate_and_focus_window(window: &tauri::WebviewWindow) {
     }
 }
 
+/// Convert a Tauri window into a nonactivating NSPanel on macOS.
+/// Lets the window receive keyboard focus without bringing the owning app
+/// to the foreground — required for Spotlight/Raycast-style overlays.
+/// On non-macOS this is a no-op.
+#[tauri::command]
+fn make_window_nonactivating_panel(window: tauri::WebviewWindow) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use cocoa::base::id;
+        use objc::runtime::Class;
+        use objc::*;
+
+        // objc 0.2 doesn't re-export `object_setClass` from libobjc, so link it
+        // ourselves. Signature: id object_setClass(id, Class).
+        extern "C" {
+            fn object_setClass(obj: *mut objc::runtime::Object, cls: *const Class) -> *mut objc::runtime::Object;
+        }
+
+        let ns_window = window.ns_window().map_err(|e| e.to_string())? as id;
+        if ns_window.is_null() {
+            return Err("ns_window is null".into());
+        }
+
+        // Tauri's underlying NSWindow subclass is `TaoWindow`. We can't message
+        // it with `setClass:` (NSObject only exposes `class`/`isKindOfClass:`).
+        // Swap the isa pointer directly via the objc runtime.
+        // Style mask `NSWindowStyleMaskNonactivatingPanel` (1<<7) is silently
+        // ignored unless the underlying class is NSPanel.
+        let panel_class: *const Class = class!(NSPanel);
+        if !panel_class.is_null() {
+            object_setClass(ns_window as *mut _, panel_class);
+        }
+
+        let current_mask: u64 = msg_send![ns_window, styleMask];
+        let nonactivating: u64 = 1 << 7;
+        let new_mask = current_mask | nonactivating;
+        let _: () = msg_send![ns_window, setStyleMask: new_mask];
+
+        // Float above normal windows; works while another app is frontmost.
+        let _: () = msg_send![ns_window, setFloatingPanel: objc::runtime::YES];
+        let _: () = msg_send![ns_window, setHidesOnDeactivate: objc::runtime::NO];
+        let _: () = msg_send![ns_window, setBecomesKeyOnlyIfNeeded: objc::runtime::NO];
+    }
+    let _ = window;
+    Ok(())
+}
+
 // ============================================================================
 // Claude.ai Web Data Import
 // ============================================================================
@@ -9689,6 +9907,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder, PredefinedMenuItem};
 
@@ -9882,6 +10101,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            make_window_nonactivating_panel,
             list_projects,
             list_sessions,
             get_sessions_usage,
@@ -9941,6 +10161,7 @@ pub fn run() {
             find_relocation_candidates,
             get_session_file_path,
             get_session_summary,
+            set_session_title,
             copy_to_clipboard,
             get_settings_path,
             get_mcp_config_path,

@@ -19,7 +19,7 @@ export function ActivityCard({ className = "" }: { className?: string }) {
   }>(["activityStats"], "get_activity_stats");
 
   if (!stats) return null;
-  const totalMessages = sessions.reduce((sum, s) => sum + s.message_count, 0);
+  const totalRounds = sessions.reduce((sum, s) => sum + s.rounds, 0);
 
   return (
     <div className={`w-full shrink-0 bg-card/50 rounded-2xl p-3 border border-border/40 overflow-hidden ${className}`}>
@@ -32,7 +32,7 @@ export function ActivityCard({ className = "" }: { className?: string }) {
           <strong className="text-foreground font-serif">{sessions.length}</strong> sessions
         </span>
         <span>
-          <strong className="text-foreground font-serif">{totalMessages}</strong> messages
+          <strong className="text-foreground font-serif">{totalRounds}</strong> rounds
         </span>
       </div>
     </div>

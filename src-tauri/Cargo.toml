@@ -42,6 +42,7 @@ filetime = "0.2"
 libc = "0.2.179"
 tauri-plugin-updater = { version = "2", features = ["rustls-tls"] }
 tauri-plugin-process = "2"
+tauri-plugin-global-shortcut = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 futures = "0.3"
 aes = "0.8"

@@ -25,6 +25,22 @@
           "x": 16,
           "y": 28
         }
+      },
+      {
+        "label": "search",
+        "url": "index.html#/search-overlay",
+        "title": "Lovcode Search",
+        "width": 720,
+        "height": 480,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "focus": false,
+        "center": true,
+        "shadow": false
       }
     ],
     "security": {

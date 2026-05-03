@@ -99,8 +99,8 @@ export function RecentActivity({
                 <p className="text-sm text-foreground truncate group-hover:text-primary transition-colors">
                   {toReadable(session.summary) || "Untitled session"}
                 </p>
-                <p className="text-xs text-muted-foreground">
-                  {session.message_count} messages
+                <p className="text-xs text-muted-foreground" title={`${session.message_count} messages total`}>
+                  {session.rounds} rounds
                 </p>
               </div>
               <span className="text-xs text-muted-foreground/70 shrink-0">

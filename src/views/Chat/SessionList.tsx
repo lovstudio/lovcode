@@ -91,7 +91,7 @@ export function SessionList({ projectId, projectPath, onBack, onSelect }: Sessio
   const [searchResults, setSearchResults] = useState<SearchResult[] | null>(null);
   const [searching, setSearching] = useState(false);
 
-  const filteredSessions = hideEmptySessions ? sessions.filter((s) => s.message_count > 0) : sessions;
+  const filteredSessions = hideEmptySessions ? sessions.filter((s) => s.rounds > 0) : sessions;
 
   useEffect(() => {
     if (!searchQuery.trim()) {
@@ -371,7 +371,7 @@ generator: "Lovcode"
                     <div className="flex-1 min-w-0">
                       <p className="font-medium text-ink line-clamp-2">{toReadable(session.summary) || "Untitled session"}</p>
                       <div className="flex items-center gap-3 mt-2 text-sm text-muted-foreground">
-                        <span>{session.message_count} messages</span>
+                        <span title={`${session.message_count} messages total`}>{session.rounds} rounds</span>
                         <span>·</span>
                         <span>{formatDate(session.last_modified)}</span>
                         {usage && usage.cost_usd > 0 && (

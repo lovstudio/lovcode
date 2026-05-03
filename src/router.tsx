@@ -14,12 +14,20 @@ import RootLayout from "./pages/_layout";
 // Router Configuration
 // ============================================================================
 
-// Wrap routes with root layout
+// Routes that bypass RootLayout — used by secondary windows (search overlay,
+// future auxiliary panels) that render bare UI without the app shell.
+const STANDALONE_PATHS = new Set(["/search-overlay", "/prompt-detail"]);
+const standaloneRoutes = routes.filter((r) =>
+  r && typeof r === "object" && "path" in r && STANDALONE_PATHS.has(`/${(r as { path?: string }).path ?? ""}`)
+);
+const layoutRoutes = routes.filter((r) => !standaloneRoutes.includes(r));
+
 const routesWithLayout = [
+  ...standaloneRoutes,
   {
     path: "/",
     element: <RootLayout />,
-    children: routes,
+    children: layoutRoutes,
   },
 ];
 

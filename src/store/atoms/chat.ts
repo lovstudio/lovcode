@@ -40,3 +40,8 @@ export const importCollapsedAtom = atomWithStorage("lovcode:sidebar:importCollap
 export const chatViewModeAtom = atomWithStorage<"projects" | "sessions" | "chats">("lovcode:chatViewMode", "projects");
 export const allProjectsSortByAtom = atomWithStorage<"name" | "recent" | "sessions">("lovcode:allProjects:sortBy", "recent");
 export const hideEmptySessionsAllAtom = atomWithStorage("lovcode-hide-empty-sessions-all", false);
+export const allProjectsGroupedAtom = atomWithStorage<boolean>("lovcode:allProjects:grouped", true);
+export type ProjectListDataSource = "all" | "local" | "app-code" | "app-web" | "app-cowork";
+export const allProjectsDataSourceAtom = atomWithStorage<ProjectListDataSource>("lovcode:allProjects:dataSource", "all");
+// Stored as string[] (atomWithStorage requires JSON-serializable values); used as Set<string> in UI.
+export const allProjectsCollapsedGroupsAtom = atomWithStorage<string[] | null>("lovcode:allProjects:collapsedGroups", null);

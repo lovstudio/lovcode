@@ -56,12 +56,22 @@ export interface SessionUsage {
   context_tokens: number;
 }
 
+export type TitleSource = "custom" | "ai" | "slug" | "summary" | "prompt" | "none";
+
 export interface Session {
   id: string;
   project_id: string;
   project_path: string | null;
   title: string | null;
   summary: string | null;
+  /** Most-recent user prompt (Claude Code's `lastPrompt`), used as a labeled
+   *  fallback when no title/summary exists. Never substituted into title. */
+  last_prompt?: string | null;
+  /** Where the rendered label came from. Lets the UI badge the source. */
+  title_source?: TitleSource | null;
+  /** User-initiated conversation rounds (one per user message). */
+  rounds: number;
+  /** Total transcript messages (user + assistant). Assistant may emit several per round, so message_count >= rounds. */
   message_count: number;
   created_at: number;
   last_modified: number;

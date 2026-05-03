@@ -59,7 +59,6 @@ export function FeaturesLayout({ children, feature, currentFeature, onFeatureCli
       title: "Basic",
       items: [
         { key: "basic-env", label: "Environment" },
-        { key: "basic-llm", label: "LLM Provider" },
         { key: "basic-maas", label: "MaaS Registry" },
         { key: "basic-version", label: "CC Version" },
         { key: "basic-context", label: "Context" },

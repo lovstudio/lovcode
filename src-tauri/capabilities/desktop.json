@@ -6,7 +6,9 @@
     "linux"
   ],
   "windows": [
-    "main"
+    "main",
+    "search",
+    "prompt-detail-*"
   ],
   "permissions": []
 }

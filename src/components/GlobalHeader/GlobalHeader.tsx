@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   PersonIcon, ChevronLeftIcon, ChevronRightIcon,
   RocketIcon, CounterClockwiseClockIcon, BookmarkIcon, LayersIcon,
-  CalendarIcon,
+  CalendarIcon, CubeIcon,
 } from "@radix-ui/react-icons";
 import { Avatar, AvatarImage, AvatarFallback } from "../ui/avatar";
 import { Popover, PopoverTrigger, PopoverContent } from "../ui/popover";
@@ -43,7 +43,7 @@ export function GlobalHeader({
   const showFeatureTabs = !!workspace && featureTabsLayout === "horizontal";
 
   // Main nav features - use primaryFeature for active state (not affected by profile menu clicks)
-  const mainNavFeatures = ["workspace", "chat", "kb-distill", "kb-reference", "events"] as const;
+  const mainNavFeatures = ["workspace", "chat", "kb-distill", "kb-reference", "events", "basic-maas"] as const;
   const isMainNavFeature = (f: string | null) => f && (mainNavFeatures.includes(f as typeof mainNavFeatures[number]) || f.startsWith("kb-"));
 
   // Handle main nav click - updates primaryFeature
@@ -103,6 +103,12 @@ export function GlobalHeader({
             onClick={() => handleMainNavClick("features")}
             icon={<LayersIcon className="w-4 h-4" />}
             label="Configuration"
+          />
+          <NavButton
+            isActive={primaryFeature === "basic-maas"}
+            onClick={() => handleMainNavClick("basic-maas")}
+            icon={<CubeIcon className="w-4 h-4" />}
+            label="MaaS"
           />
           <NavButton
             isActive={primaryFeature?.startsWith("kb-") ?? false}

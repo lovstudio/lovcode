@@ -71,7 +71,7 @@ export function ProjectDashboard({ project }: ProjectDashboardProps) {
     return allSessions
       .filter((s) => {
         if (!s.project_path) return false;
-        return normalizePath(s.project_path) === projectPathNorm && s.message_count > 0;
+        return normalizePath(s.project_path) === projectPathNorm && s.rounds > 0;
       })
       .sort((a, b) => b.last_modified - a.last_modified);
   }, [allSessions, project.path]);
@@ -301,8 +301,8 @@ export function ProjectDashboard({ project }: ProjectDashboardProps) {
                           <p className="text-sm truncate">
                             {toReadable(session.summary) || "Untitled"}
                           </p>
-                          <p className="text-xs text-muted-foreground">
-                            {session.message_count} messages · {formatDate(session.last_modified)}
+                          <p className="text-xs text-muted-foreground" title={`${session.message_count} messages total`}>
+                            {session.rounds} rounds · {formatDate(session.last_modified)}
                           </p>
                         </div>
                       </button>

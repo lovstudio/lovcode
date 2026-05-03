@@ -12,6 +12,8 @@ export {
   originalChatAtom, markdownPreviewAtom, expandMessagesAtom,
   sessionContextTabAtom, sessionSelectModeAtom, hideEmptySessionsAtom, userPromptsOnlyAtom,
   chatViewModeAtom, allProjectsSortByAtom, hideEmptySessionsAllAtom,
+  allProjectsGroupedAtom, allProjectsDataSourceAtom, allProjectsCollapsedGroupsAtom,
+  type ProjectListDataSource,
   sidebarSessionSortByAtom, type SessionSortBy,
   sidebarViewModeAtom, type SidebarViewMode,
   archivedSessionIdsAtom, showArchivedSessionsAtom,
@@ -23,7 +25,7 @@ export {
 } from "./atoms/chat";
 
 // Settings atoms
-export { routerTestStatusAtom, routerTestMessageAtom } from "./atoms/settings";
+export { routerTestStatusAtom, routerTestMessageAtom, globalChatSearchHotkeyAtom } from "./atoms/settings";
 
 // Commands atoms
 export {

@@ -237,7 +237,7 @@ export function VerticalFeatureTabs() {
   const flatSessions = useMemo(() => {
     if (viewMode !== "flat") return [];
     return visibleSessions
-      .filter((s) => s.message_count > 0)
+      .filter((s) => s.rounds > 0)
       .sort((a, b) => {
         if (sortBy === "created") return b.created_at - a.created_at;
         if (sortBy === "path") return (a.project_path ?? "").localeCompare(b.project_path ?? "");
@@ -396,7 +396,7 @@ function GroupedView({
         const projectSessions = allSessions
           .filter((s) => {
             if (!s.project_path) return false;
-            return normalizePath(s.project_path) === projectPathNorm && s.message_count > 0;
+            return normalizePath(s.project_path) === projectPathNorm && s.rounds > 0;
           })
           .sort((a, b) => {
             if (sortBy === "created") return b.created_at - a.created_at;
