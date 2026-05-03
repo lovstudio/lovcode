@@ -2,11 +2,27 @@ import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useAtom } from "jotai";
 import { fileViewModeAtom } from "@/store";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
-import { Cross2Icon, ExternalLinkIcon, CodeIcon, ReaderIcon, ColumnsIcon, ChevronLeftIcon, FileIcon } from "@radix-ui/react-icons";
+import {
+  Cross2Icon,
+  ExternalLinkIcon,
+  CodeIcon,
+  ReaderIcon,
+  ColumnsIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  DotsHorizontalIcon,
+  FileIcon,
+} from "@radix-ui/react-icons";
 import { Folder } from "lucide-react";
 import Editor from "@monaco-editor/react";
 import { MarkdownRenderer } from "../MarkdownRenderer";
-import { isImageFile } from "@/lib/utils";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "../ui/dropdown-menu";
+import { cn, getAbsoluteParentPath, isImageFile } from "@/lib/utils";
 
 const EDITOR_OPTIONS = {
   readOnly: true,
@@ -88,6 +104,11 @@ interface DirEntry {
   is_dir: boolean;
 }
 
+interface BreadcrumbSegment {
+  name: string;
+  path: string;
+}
+
 interface MonacoEditorLike {
   getModel(): {
     getLineCount(): number;
@@ -103,6 +124,139 @@ function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function buildBreadcrumbs(path: string): BreadcrumbSegment[] | null {
+  if (!path.startsWith("/")) return null;
+  const parts = path.split("/").filter(Boolean);
+  let acc = "";
+  return parts.map((name) => {
+    acc += "/" + name;
+    return { name, path: acc };
+  });
+}
+
+function PathBreadcrumbs({
+  path,
+  segments,
+  onNavigate,
+  currentIsDir,
+  className,
+}: {
+  path: string;
+  segments: BreadcrumbSegment[] | null;
+  onNavigate: (path: string) => void;
+  currentIsDir?: boolean | null;
+  className?: string;
+}) {
+  if (!segments) {
+    return (
+      <span className={cn("min-w-0 text-ink", className)} title={path}>
+        {path}
+      </span>
+    );
+  }
+
+  const isRoot = path === "/";
+  const visibleCount = 2;
+  const shouldCollapse = segments.length > visibleCount;
+  const visibleSegments = shouldCollapse ? segments.slice(-visibleCount) : segments;
+  const hiddenSegments = shouldCollapse ? segments.slice(0, -visibleCount) : [];
+  const hiddenMenuSegments = shouldCollapse
+    ? [{ name: "/", path: "/" }, ...hiddenSegments]
+    : [];
+  const separator = (
+    <ChevronRightIcon className="h-3 w-3 shrink-0 text-muted-foreground/50" />
+  );
+
+  return (
+    <nav
+      className={cn(
+        "flex min-w-0 items-center gap-0.5 overflow-hidden whitespace-nowrap text-muted-foreground",
+        className,
+      )}
+      title={path}
+      aria-label="File path"
+    >
+      {!shouldCollapse && (
+        <button
+          type="button"
+          onClick={() => onNavigate("/")}
+          disabled={isRoot}
+          className={cn(
+            "inline-flex h-5 shrink-0 items-center rounded-md px-1.5 transition-colors",
+            isRoot
+              ? "cursor-default text-ink"
+              : "cursor-pointer hover:bg-card-alt hover:text-primary",
+          )}
+          title="/"
+        >
+          /
+        </button>
+      )}
+      {hiddenSegments.length > 0 && (
+        <>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                className={cn(
+                  "inline-flex h-5 shrink-0 items-center justify-center rounded-md px-1 text-muted-foreground transition-colors hover:bg-card-alt hover:text-primary",
+                )}
+                title="Show parent folders"
+              >
+                <DotsHorizontalIcon className="h-3.5 w-3.5" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-64">
+              {hiddenMenuSegments.map((seg) => (
+                <DropdownMenuItem
+                  key={seg.path}
+                  onSelect={() => onNavigate(seg.path)}
+                  className="min-w-0"
+                >
+                  <Folder className="h-3 w-3 shrink-0 text-muted-foreground" />
+                  <span className="min-w-0">
+                    <span className="block truncate">{seg.name}</span>
+                    <span className="block truncate font-mono text-[10px] text-muted-foreground">
+                      {seg.path}
+                    </span>
+                  </span>
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </>
+      )}
+      {visibleSegments.map((seg) => {
+        const isLast = seg.path === path;
+        const showFileIcon = isLast && currentIsDir === false;
+        return (
+          <span key={seg.path} className="inline-flex min-w-0 items-center gap-0.5">
+            {separator}
+            <button
+              type="button"
+              onClick={() => onNavigate(seg.path)}
+              disabled={isLast}
+              className={cn(
+                "inline-flex min-w-0 items-center rounded-md px-1.5 transition-colors",
+                isLast ? "h-5 max-w-40" : "h-5 max-w-24",
+                isLast
+                  ? "cursor-default bg-card-alt text-ink"
+                  : "cursor-pointer hover:bg-card-alt hover:text-primary",
+              )}
+              title={seg.path}
+            >
+              {showFileIcon && (
+                <FileIcon className="h-3 w-3 shrink-0 text-muted-foreground" />
+              )}
+              <span className="truncate">{seg.name}</span>
+            </button>
+          </span>
+        );
+      })}
+    </nav>
+  );
 }
 
 export function FileViewer({ filePath, onClose, revealLine, revealColumn, revealNonce }: FileViewerProps) {
@@ -183,6 +337,7 @@ export function FileViewer({ filePath, onClose, revealLine, revealColumn, reveal
   const isImage = useMemo(() => !isDir && isImageFile(fileName), [isDir, fileName]);
   const imageSrc = useMemo(() => isImage ? convertFileSrc(currentPath) : null, [isImage, currentPath]);
   const fileExt = useMemo(() => fileName.split('.').pop()?.toUpperCase() || '', [fileName]);
+  const markdownCwd = useMemo(() => getAbsoluteParentPath(currentPath), [currentPath]);
 
   const navigateTo = useCallback((path: string) => {
     if (path === currentPath) return;
@@ -190,17 +345,7 @@ export function FileViewer({ filePath, onClose, revealLine, revealColumn, reveal
     setCurrentPath(path);
   }, [currentPath]);
 
-  // Split a path into clickable breadcrumb segments. Each segment carries the
-  // absolute path up to and including itself, so clicking jumps directly there.
-  const breadcrumbs = useMemo(() => {
-    if (!currentPath.startsWith("/")) return null;
-    const parts = currentPath.split("/").filter(Boolean);
-    let acc = "";
-    return parts.map((name) => {
-      acc += "/" + name;
-      return { name, path: acc };
-    });
-  }, [currentPath]);
+  const breadcrumbs = useMemo(() => buildBreadcrumbs(currentPath), [currentPath]);
 
   const goBack = useCallback(() => {
     setHistory((h) => {
@@ -309,9 +454,15 @@ export function FileViewer({ filePath, onClose, revealLine, revealColumn, reveal
             <ChevronLeftIcon className="w-4 h-4" />
           </button>
         )}
-        <span className="flex-1 text-sm font-medium text-ink truncate" title={currentPath}>
-          {fileName}
-        </span>
+        <div className="min-w-0 flex-1">
+          <PathBreadcrumbs
+            path={currentPath}
+            segments={breadcrumbs}
+            onNavigate={navigateTo}
+            currentIsDir={isDir}
+            className="text-sm font-medium"
+          />
+        </div>
         {isMarkdown && !isDir && (
           <div className="flex items-center bg-card-alt rounded-lg p-0.5">
             <button
@@ -377,46 +528,6 @@ export function FileViewer({ filePath, onClose, revealLine, revealColumn, reveal
           </div>
         ) : isDir ? (
           <div className="h-full overflow-auto bg-background">
-            <div className="px-4 py-2 border-b border-border bg-canvas-alt sticky top-0 z-10">
-              <div className="text-xs text-muted-foreground break-all leading-snug" title={currentPath}>
-                {breadcrumbs ? (
-                  <>
-                    <button
-                      onClick={() => navigateTo("/")}
-                      className="rounded cursor-pointer hover:text-primary hover:underline underline-offset-2 transition-colors"
-                      title="/"
-                    >
-                      /
-                    </button>
-                    {breadcrumbs.map((seg, i) => {
-                      const isLast = i === breadcrumbs.length - 1;
-                      return (
-                        <span key={seg.path}>
-                          <button
-                            onClick={() => navigateTo(seg.path)}
-                            disabled={isLast}
-                            className={`rounded transition-colors ${
-                              isLast
-                                ? "text-ink cursor-default"
-                                : "cursor-pointer hover:text-primary hover:underline underline-offset-2"
-                            }`}
-                            title={seg.path}
-                          >
-                            {seg.name}
-                          </button>
-                          {!isLast && <span className="text-muted-foreground">/</span>}
-                        </span>
-                      );
-                    })}
-                  </>
-                ) : (
-                  <span>{currentPath}</span>
-                )}
-              </div>
-              <div className="text-[11px] text-muted-foreground/70 mt-0.5">
-                {dirEntries.length} {dirEntries.length === 1 ? "item" : "items"}
-              </div>
-            </div>
             {dirEntries.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-48 gap-2">
                 <Folder className="w-8 h-8 text-muted-foreground/40" />
@@ -458,7 +569,7 @@ export function FileViewer({ filePath, onClose, revealLine, revealColumn, reveal
           </div>
         ) : isImage && imageSrc ? (
           <div className="h-full flex">
-            <div className="flex-1 flex items-center justify-center p-4 bg-[#1e1e1e]">
+            <div className="flex-1 flex items-center justify-center p-4 bg-foreground">
               <img
                 src={imageSrc}
                 alt={fileName}
@@ -490,7 +601,7 @@ export function FileViewer({ filePath, onClose, revealLine, revealColumn, reveal
           </div>
         ) : isMarkdown && viewMode === "preview" ? (
           <div className="h-full overflow-auto p-6 bg-background">
-            <MarkdownRenderer content={content} />
+            <MarkdownRenderer content={content} cwd={markdownCwd} />
           </div>
         ) : isMarkdown && viewMode === "split" ? (
           <div className="h-full flex">
@@ -507,7 +618,7 @@ export function FileViewer({ filePath, onClose, revealLine, revealColumn, reveal
               />
             </div>
             <div className="w-1/2 overflow-auto p-6 bg-background">
-              <MarkdownRenderer content={content} className="max-w-none" />
+              <MarkdownRenderer content={content} cwd={markdownCwd} className="max-w-none" />
             </div>
           </div>
         ) : (

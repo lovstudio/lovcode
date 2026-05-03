@@ -34,12 +34,14 @@ const barePathLike = String.raw`(?:${explicitPath(BARE_STOP_CHARS, false)}|${bar
 // The selector is consumed so wrapped paths still parse, but it is not rendered as
 // part of the clickable path segment.
 const LOCATION_SUFFIX = String.raw`(?::\d+(?::\d+)?(?:\([^)\n]*\))?)?`;
+const WRAPPED_PREFIX = String.raw`@?\s*`;
+const WRAPPED_SUFFIX = String.raw`\s*`;
 const PATH_RE = new RegExp([
-  String.raw`\`@?(${pathLike("`")}${LOCATION_SUFFIX})\``,
-  `「@?(${pathLike("」")}${LOCATION_SUFFIX})」`,
-  `『@?(${pathLike("』")}${LOCATION_SUFFIX})』`,
-  `"@?(${pathLike('"')}${LOCATION_SUFFIX})"`,
-  `'@?(${pathLike("'")}${LOCATION_SUFFIX})'`,
+  String.raw`\`${WRAPPED_PREFIX}(${pathLike("`")}${LOCATION_SUFFIX})${WRAPPED_SUFFIX}\``,
+  `「${WRAPPED_PREFIX}(${pathLike("」")}${LOCATION_SUFFIX})${WRAPPED_SUFFIX}」`,
+  `『${WRAPPED_PREFIX}(${pathLike("』")}${LOCATION_SUFFIX})${WRAPPED_SUFFIX}』`,
+  `"${WRAPPED_PREFIX}(${pathLike('"')}${LOCATION_SUFFIX})${WRAPPED_SUFFIX}"`,
+  `'${WRAPPED_PREFIX}(${pathLike("'")}${LOCATION_SUFFIX})${WRAPPED_SUFFIX}'`,
   // Bare branch - `@` is treated as a leading sigil (IDE-style mention) and consumed before the path.
   String.raw`(?:^|[\s(\[<])@?(${barePathLike}${LOCATION_SUFFIX})`,
 ].join("|"), "g");
@@ -72,7 +74,38 @@ export interface PathHit {
   raw: string;
   resolved: string;
   isDir: boolean;
+  exists?: boolean;
+  warning?: string | null;
+  candidates?: PathCandidate[];
 }
+
+export interface PathCandidate {
+  path: string;
+  source: string;
+  isDir: boolean;
+  fullMatch: boolean;
+  exists?: boolean;
+}
+
+type RawPathCandidate = {
+  path: string;
+  source: string;
+  is_dir?: boolean;
+  isDir?: boolean;
+  full_match?: boolean;
+  fullMatch?: boolean;
+  exists?: boolean;
+};
+
+type RawPathHit = {
+  raw: string;
+  resolved: string;
+  is_dir?: boolean;
+  isDir?: boolean;
+  exists?: boolean;
+  warning?: string | null;
+  candidates?: RawPathCandidate[];
+};
 
 function pickGroup(m: RegExpExecArray): string | null {
   for (let i = 1; i < m.length; i++) {
@@ -84,7 +117,7 @@ function pickGroup(m: RegExpExecArray): string | null {
 // Strip both prose punctuation tail and IDE location suffix to derive the filesystem path.
 function normalizeCaptured(raw: string): string {
   // First drop any IDE-style ":line[:col](selector)" suffix; then prose punctuation.
-  return stripPathDecorations(raw).replace(/[,.;:!?)\]]+$/, "");
+  return stripPathDecorations(raw.trim()).replace(/[,.;:!?)\]]+$/, "");
 }
 
 export function extractPathCandidates(text: string): string[] {
@@ -125,9 +158,31 @@ export function extractMarkdownLinkHrefs(text: string): string[] {
 }
 
 const cache = new Map<string, PathHit | null>();
+const resolveCache = new Map<string, PathHit | null>();
 
 function cacheKey(raw: string, cwd: string | undefined): string {
   return `${cwd ?? ""}::${raw}`;
+}
+
+function normalizePathCandidate(candidate: RawPathCandidate): PathCandidate {
+  return {
+    path: candidate.path,
+    source: candidate.source,
+    isDir: candidate.isDir ?? candidate.is_dir ?? false,
+    fullMatch: candidate.fullMatch ?? candidate.full_match ?? false,
+    exists: candidate.exists,
+  };
+}
+
+function normalizePathHit(hit: RawPathHit): PathHit {
+  return {
+    raw: hit.raw,
+    resolved: hit.resolved,
+    isDir: hit.isDir ?? hit.is_dir ?? false,
+    exists: hit.exists,
+    warning: hit.warning,
+    candidates: hit.candidates?.map(normalizePathCandidate),
+  };
 }
 
 export async function checkPaths(paths: string[], cwd?: string): Promise<Map<string, PathHit>> {
@@ -146,8 +201,9 @@ export async function checkPaths(paths: string[], cwd?: string): Promise<Map<str
 
   if (toQuery.length > 0) {
     try {
-      const hits = await invoke<PathHit[]>("check_paths_exist", { paths: toQuery, cwd });
-      const hitMap = new Map(hits.map((h) => [h.raw, h]));
+      const hits = await invoke<RawPathHit[]>("check_paths_exist", { paths: toQuery, cwd });
+      const normalizedHits = hits.map(normalizePathHit);
+      const hitMap = new Map(normalizedHits.map((h) => [h.raw, h]));
       for (const p of toQuery) {
         const hit = hitMap.get(p) ?? null;
         cache.set(cacheKey(p, cwd), hit);
@@ -155,6 +211,38 @@ export async function checkPaths(paths: string[], cwd?: string): Promise<Map<str
       }
     } catch (err) {
       console.error("check_paths_exist failed", err);
+    }
+  }
+
+  return result;
+}
+
+export async function resolvePathCandidates(paths: string[], cwd?: string): Promise<Map<string, PathHit>> {
+  const result = new Map<string, PathHit>();
+  const toQuery: string[] = [];
+
+  for (const path of paths) {
+    const key = cacheKey(path, cwd);
+    if (resolveCache.has(key)) {
+      const hit = resolveCache.get(key);
+      if (hit) result.set(path, hit);
+    } else {
+      toQuery.push(path);
+    }
+  }
+
+  if (toQuery.length > 0) {
+    try {
+      const hits = await invoke<RawPathHit[]>("resolve_path_candidates", { paths: toQuery, cwd });
+      const normalizedHits = hits.map(normalizePathHit);
+      const hitMap = new Map(normalizedHits.map((hit) => [hit.raw, hit]));
+      for (const path of toQuery) {
+        const hit = hitMap.get(path) ?? null;
+        resolveCache.set(cacheKey(path, cwd), hit);
+        if (hit) result.set(path, hit);
+      }
+    } catch (err) {
+      console.error("resolve_path_candidates failed", err);
     }
   }
 

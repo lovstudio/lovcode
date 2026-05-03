@@ -6,25 +6,11 @@
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { useQuery } from "@tanstack/react-query";
-import type { LocalSkill, TemplateComponent, TemplatesCatalog } from "../../types";
+import type { LocalSkill, TemplatesCatalog } from "../../types";
 import { TemplateDetailView } from "../../views/Marketplace";
 import { FeaturesLayout } from "../../views/Features";
 import { LoadingState } from "../../components/config";
-
-function skillToTemplate(skill: LocalSkill): TemplateComponent {
-  return {
-    name: skill.name,
-    path: skill.path,
-    category: "skill",
-    component_type: "skill",
-    description: skill.description,
-    downloads: skill.marketplace?.downloads ?? null,
-    content: skill.content,
-    source_id: skill.marketplace?.source_id ?? null,
-    source_name: skill.marketplace?.source_name ?? null,
-    author: skill.marketplace?.author ?? null,
-  };
-}
+import { skillToTemplate } from "../../views/Skills/skillTemplates";
 
 export default function SkillDetailPage() {
   const { name } = useParams<{ name: string }>();

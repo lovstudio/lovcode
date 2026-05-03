@@ -13,23 +13,8 @@ import { useEffect, useRef } from "react";
 import { useSetAtom } from "jotai";
 import { invoke } from "@tauri-apps/api/core";
 import { navigationStateAtom } from "../store";
-import type { LocalSkill, LocalCommand, TemplateComponent } from "../types";
-
-/** Convert LocalSkill to TemplateComponent */
-function skillToTemplate(skill: LocalSkill): TemplateComponent {
-  return {
-    name: skill.name,
-    path: skill.path,
-    category: "skill",
-    component_type: "skill",
-    description: skill.description,
-    downloads: skill.marketplace?.downloads ?? null,
-    content: skill.content,
-    source_id: skill.marketplace?.source_id ?? null,
-    source_name: skill.marketplace?.source_name ?? null,
-    author: skill.marketplace?.author ?? null,
-  };
-}
+import type { LocalSkill, LocalCommand } from "../types";
+import { skillToTemplate } from "../views/Skills/skillTemplates";
 
 /**
  * Hook to fetch detail data for detail routes.

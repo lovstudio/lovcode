@@ -56,7 +56,7 @@ import {
 import { ProjectPathLabel } from "../../components/shared/ProjectPathLabel";
 import { ExportDialog } from "./ExportDialog";
 import { chatSearchOpenAtom } from "../../components/GlobalChatSearch";
-import type { Project, Session, ChatMessage, Message } from "../../types";
+import type { ContentBlock, Project, Session, ChatMessage, Message } from "../../types";
 
 interface ProjectListProps {
   onSelectProject: (p: Project) => void;
@@ -1026,11 +1026,45 @@ function SessionItemButton({
 // Session Detail (right panel)
 // ============================================================================
 
+function isUserPromptMessage(msg: Message) {
+  return msg.role === "user" && !msg.is_tool;
+}
+
+function isUserPromptGroup(group: Message[]) {
+  return group.length > 0 && group.every(isUserPromptMessage);
+}
+
+function messageGroupKind(msg: Message) {
+  if (isUserPromptMessage(msg)) return "user";
+  if (msg.is_tool) return "tool";
+  return msg.role;
+}
+
+function groupHasToolBlocks(group: Message[]) {
+  return group.some((msg) =>
+    msg.is_tool ||
+    msg.content_blocks?.some((block) => block.type === "tool_use" || block.type === "tool_result"),
+  );
+}
+
+function flattenGroupContentBlocks(group: Message[]) {
+  const blocks: ContentBlock[] = [];
+  for (const msg of group) {
+    if (msg.content_blocks?.length) {
+      blocks.push(...msg.content_blocks);
+    } else if (msg.content.trim()) {
+      blocks.push({ type: "text", text: msg.content });
+    }
+  }
+  return blocks;
+}
+
 function groupConsecutiveByRole(messages: Message[]): Message[][] {
   const groups: Message[][] = [];
   for (const msg of messages) {
     const last = groups[groups.length - 1];
-    if (last && last[0].role === msg.role && msg.role !== "user") last.push(msg);
+    const kind = messageGroupKind(msg);
+    if (last && messageGroupKind(last[0]) === kind && kind !== "user") last.push(msg);
     else groups.push([msg]);
   }
   return groups;
@@ -1085,8 +1119,8 @@ function StickyPromptList({
     const result: Section[] = [];
     let current: Section | null = null;
     groupedMessages.forEach((g, i) => {
-      const isUser = g[0].role === "user";
-      if (isUser || current === null) {
+      const isPrompt = isUserPromptGroup(g);
+      if (isPrompt || current === null) {
         current = { groups: [g], startIdx: i };
         result.push(current);
       } else {
@@ -1101,11 +1135,11 @@ function StickyPromptList({
     <>
       {sections.map((section) => {
         const head = section.groups[0];
-        const headIsUser = head[0].role === "user";
+        const headIsUser = isUserPromptGroup(head);
         return (
           <div key={`${head[0].uuid}-${head[0].line_number}`}>
             {section.groups.map((group) => {
-              const isUserGroup = group[0].role === "user";
+              const isUserGroup = isUserPromptGroup(group);
               const promptIndex = isUserGroup ? ++userCounter : undefined;
               const sticky = isUserGroup && headIsUser && !userPromptsOnly;
               return (
@@ -1196,10 +1230,14 @@ const MessageGroupCard = memo(function MessageGroupCard({
     [group, markdownPreview, originalChat],
     expandMessages,
   );
-  const isUser = group[0].role === "user";
+  const isUser = isUserPromptGroup(group);
   const userPromptText = isUser ? groupContent : "";
   const userPromptCompressed = isUser ? compressPromptText(userPromptText) : null;
   const userPathHits = usePathHits(userPromptText, cwd, true);
+  const toolBlocks = useMemo(
+    () => (!isUser && groupHasToolBlocks(group) ? flattenGroupContentBlocks(group) : null),
+    [group, isUser],
+  );
 
   return (
     <div
@@ -1263,18 +1301,22 @@ const MessageGroupCard = memo(function MessageGroupCard({
             }`}
           >
             <div className="space-y-1.5">
-              {group.map((msg, idx) => (
-                <div
-                  key={`${msg.uuid}-${msg.line_number}`}
-                  className={idx > 0 ? "pt-1.5 border-t border-border/30" : ""}
-                >
-                  {msg.content_blocks && !originalChat ? (
-                    <ContentBlockRenderer blocks={msg.content_blocks} markdown={markdownPreview} highlight={highlight} disableTextCollapse cwd={cwd} />
-                  ) : (
-                    <CollapsibleContent content={toReadable(msg.content)} markdown={markdownPreview} highlight={highlight} disableCollapse cwd={cwd} />
-                  )}
-                </div>
-              ))}
+              {toolBlocks ? (
+                <ContentBlockRenderer blocks={toolBlocks} markdown={markdownPreview} highlight={highlight} disableTextCollapse cwd={cwd} transformText={toReadable} />
+              ) : (
+                group.map((msg, idx) => (
+                  <div
+                    key={`${msg.uuid}-${msg.line_number}`}
+                    className={idx > 0 ? "pt-1.5 border-t border-border/30" : ""}
+                  >
+                    {msg.content_blocks ? (
+                      <ContentBlockRenderer blocks={msg.content_blocks} markdown={markdownPreview} highlight={highlight} disableTextCollapse cwd={cwd} transformText={toReadable} />
+                    ) : (
+                      <CollapsibleContent content={toReadable(msg.content)} markdown={markdownPreview} highlight={highlight} disableCollapse cwd={cwd} />
+                    )}
+                  </div>
+                ))
+              )}
             </div>
           </div>
         )}
@@ -1487,8 +1529,8 @@ function SessionDetail({ session, onClose, highlight }: { session: Session; onCl
   }, [session.project_id, session.id]);
 
   const filteredMessages = useMemo(() => {
-    let result = originalChat ? messages.filter((m) => !m.is_meta && !m.is_tool) : messages;
-    if (userPromptsOnly) result = result.filter((m) => m.role === "user");
+    let result = originalChat ? messages.filter((m) => !m.is_meta) : messages;
+    if (userPromptsOnly) result = result.filter((m) => isUserPromptMessage(m));
     return result;
   }, [messages, originalChat, userPromptsOnly]);
 

@@ -35,12 +35,17 @@
 
 ## Release Highlights
 
+### v0.33.0 — Skills Table and Smart Path Routing
+
+Skills management now uses a dense sortable table with vendor/source filters, install metadata, token estimates, and marketplace previews. Markdown content across marketplace and file previews shares the same renderer with GFM tables and smart local-path links, including candidate-prefix routing for agent output paths. File previews now use a compact Finder-style breadcrumb for faster navigation, and structured tool results can preview generated images inline.
+
 ### v0.32.0 — Inline File Preview
 
 Local paths in prompts and chat messages now open inside Lovcode with a resizable preview pane. File references with `:line:column` jump directly to the target location, global search has scoped modes for text, IDs, and metadata, and document sidebars can be resized and restored.
 
 | Version | Highlights |
 |---------|------------|
+| **0.33.0** | Skills management table with vendor/source filtering, ranking, install metadata, token estimates, and marketplace previews; shared MarkdownRenderer table/path support across marketplace and file previews; smart path routing offers candidate prefix paths for agent output files; FileViewer path navigation uses a compact Finder-style breadcrumb; tool-result images can open in the preview pane |
 | **0.32.0** | Inline file preview for local path links with line/column reveal, directory browsing, and resizable preview pane; prompt path detection handles `@src/file.tsx:line:column(selector)` style references; global search gains All / Full text / Session ID / Details modes; document reader sidebars are now resizable and persisted |
 | **0.31.0** | Architecture refactor: removed Workspace dashboard (PanelGrid, FeatureTabs, KanbanBoard, GitHistory, LogoManager, ProjectDashboard) in favor of page-centric routing; `/chat/*` → `/history/*`; `/knowledge/reference` (static) → `/knowledge/source/[id]` (dynamic) with `[...docPath]` sub-routes; new `useStreamedSessions` hook for streamed session list rendering; splash now waits for `/history` `ProjectList` `app:ready` signal before dismissing; LLM provider settings page removed |
 | **0.30.1** | Patch: silence dev-mode `[TAURI] Couldn't find callback id` warnings — defer `get_network_info` to next macrotask, persist `NETWORK_INFO_CACHE` to `~/.lovstudio/lovcode/cache/network.json` so dev restarts keep the cache; annual-report-2025 no longer recorded as `lastPath` resume target |
@@ -69,14 +74,15 @@ Local paths in prompts and chat messages now open inside Lovcode with a resizabl
 - **Live claude.ai Sync** — Pull web conversations directly via decrypted cookies (no manual export needed); also supports `.zip` / directory import
 - **Continue From the Bottom** — Reply to a session inline without leaving the detail view
 - **Rich Markdown Rendering** — GFM tables and syntax-highlighted code blocks (Warm Academic theme) inside chat messages
-- **Smart Path Links** — Bare paths, prompt mentions, and markdown `[text](path)` links are existence-checked against the session `cwd`; matches open in a Lovcode preview pane, editor, or Finder
+- **Smart Path Links** — Bare paths, prompt mentions, and markdown `[text](path)` links are existence-checked against the relevant `cwd`; unresolved agent-output paths surface candidate prefix routes and existing files open in a Lovcode preview pane
 - **Live Context-Window Readout** — Session detail footer shows the active model, provider, and peak context-window occupancy (input + cache_read + cache_creation) per round
-- **Structured Content Blocks** — Tool calls, thinking, and tool results rendered as first-class blocks
+- **Structured Content Blocks** — Tool calls, thinking, grouped tool results, and generated images render as first-class blocks with preview support
 - **Sidebar with Pinned / Recent / Import** — Tri-state Pinned toggle mirrored to Claude desktop `starredIds`; Algolia-style ⌘K search
 - **MaaS Registry** — Manage custom Model-as-a-Service providers with vendor/model hierarchy, inline tokens, Verify fingerprinting, and remote model-list pull (`/settings/maas`)
 - **Inline Model Picker** — Switch active provider · vendor · model from the chat input footer; MRU remembers your last 5 picks across sessions
 - **Commands / MCP / Skills / Hooks / Sub-Agents / Output Styles** — Full configuration surface for the Claude Code ecosystem
-- **Marketplace** — Browse and install community templates
+- **Skills Manager** — Sort, rank, filter, preview, and inspect installed skills with vendor/source metadata, install timestamps, and token estimates
+- **Marketplace** — Browse and install community templates with shared Markdown table rendering and smart local-path links
 - **Customizable Statusbar** — Personalize your statusbar display with scripts
 
 ## oh-my-lovcode

@@ -2727,7 +2727,7 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
 name = "lovcode"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "aes",
  "arboard",

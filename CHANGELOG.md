@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.33.0
+
+### Minor Changes
+
+- Redesign skills management around a sortable table with vendor/source filters, token estimates, install metadata, ranking controls, and marketplace previews.
+- Unify markdown table rendering and smart local-path links across marketplace and file previews.
+- Add candidate-prefix path routing for agent output paths, including missing-path warnings and user-selectable alternate roots.
+- Make file preview navigation use a compact Finder-style breadcrumb and keep file previews available from shared MarkdownRenderer path links.
+- Improve structured tool-result rendering with grouped tool invocations and image result previews.
+
 ## 0.32.0 - 2026-05-03
 
 ### Minor Changes

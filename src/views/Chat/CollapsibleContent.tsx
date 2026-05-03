@@ -9,7 +9,7 @@ import { warmAcademicTheme } from "../../lib/codeTheme";
 import { PathLink } from "./PathLink";
 import { PathAwareText } from "./PathAwareText";
 import { usePathHits } from "./usePathHits";
-import type { PathHit } from "./pathDetection";
+import { makeRehypePaths } from "./markdownPathPlugins";
 
 interface CollapsibleContentProps {
   content: string;
@@ -29,59 +29,6 @@ type HastNode = {
   properties?: Record<string, unknown>;
   children?: HastNode[];
 };
-
-// Rehype plugin factory: replaces detected path strings inside text nodes with a custom
-// `path-link` element. The element carries the raw match in data-path; rendering goes through
-// react-markdown's `components` map so the resolved hit is looked up at render time.
-function makeRehypePaths(hits: Map<string, PathHit>) {
-  return function rehypePathsPlugin() {
-    return (tree: HastNode) => {
-      if (hits.size === 0) return;
-      // Build a sorted list of unique raw strings, longest first to avoid prefix collisions.
-      const rawList = Array.from(hits.keys()).sort((a, b) => b.length - a.length);
-      const escaped = rawList.map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-      const re = new RegExp(`(?:^|(?<=[\\s\`'"(\\[<「『“‘《]))(${escaped.join("|")})(?=$|[\\s\`'"<>)\\]」』”’》,.;:!?]|$)`, "g");
-
-      const walk = (parent: HastNode) => {
-        if (!parent.children) return;
-        if (parent.type === "element" && parent.tagName && ["script", "style", "pre", "a"].includes(parent.tagName)) return;
-        const next: HastNode[] = [];
-        for (const child of parent.children) {
-          if (child.type === "text" && typeof child.value === "string" && child.value.length > 0) {
-            const value = child.value;
-            re.lastIndex = 0;
-            let last = 0;
-            let m: RegExpExecArray | null;
-            let matched = false;
-            while ((m = re.exec(value)) !== null) {
-              matched = true;
-              const raw = m[1];
-              if (m.index > last) next.push({ type: "text", value: value.slice(last, m.index) });
-              next.push({
-                type: "element",
-                tagName: "span",
-                properties: { "data-path-link": raw },
-                children: [{ type: "text", value: raw }],
-              });
-              last = m.index + m[0].length;
-              if (m[0].length === 0) re.lastIndex++;
-            }
-            if (!matched) {
-              next.push(child);
-            } else if (last < value.length) {
-              next.push({ type: "text", value: value.slice(last) });
-            }
-          } else {
-            walk(child);
-            next.push(child);
-          }
-        }
-        parent.children = next;
-      };
-      walk(tree);
-    };
-  };
-}
 
 // Rehype plugin factory: returns a unified-style plugin that highlights `query` in text nodes
 function makeRehypeHighlight(query: string) {

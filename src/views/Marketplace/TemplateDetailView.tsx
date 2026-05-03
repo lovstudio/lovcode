@@ -1,11 +1,12 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import Markdown from "react-markdown";
 import { Pencil1Icon, TrashIcon, ExternalLinkIcon, DotsHorizontalIcon, FileIcon, CopyIcon } from "@radix-ui/react-icons";
 import type { TemplateComponent, TemplateCategory } from "../../types";
 import { TEMPLATE_CATEGORIES } from "../../constants";
 import { DetailCard, ConfigPage } from "../../components/config";
+import { MarkdownRenderer } from "../../components/MarkdownRenderer";
 import { CodePreview } from "../../components/shared";
+import { getAbsoluteParentPath } from "../../lib/utils";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -150,6 +151,7 @@ export function TemplateDetailView({
 
   const categoryInfo = TEMPLATE_CATEGORIES.find((c) => c.key === category);
   const filePath = localPath || template.path;
+  const contentCwd = getAbsoluteParentPath(filePath);
 
   const handleReveal = () => invoke("reveal_path", { path: filePath });
   const handleOpenFile = () => invoke("open_path", { path: filePath });
@@ -225,7 +227,7 @@ export function TemplateDetailView({
                   <DropdownMenuItem
                     onClick={handleUninstall}
                     disabled={uninstalling}
-                    className="text-red-600 focus:text-red-600"
+                    className="text-destructive focus:text-destructive"
                   >
                     <TrashIcon className="w-4 h-4 mr-2" />
                     {uninstalling ? "Uninstalling..." : "Uninstall"}
@@ -284,9 +286,11 @@ export function TemplateDetailView({
                       </div>
                     </div>
                   )}
-                  <div className="prose prose-sm max-w-none prose-neutral prose-pre:bg-card-alt prose-pre:text-ink prose-code:text-ink">
-                    <Markdown>{body}</Markdown>
-                  </div>
+                  <MarkdownRenderer
+                    content={body}
+                    cwd={contentCwd}
+                    className="max-w-none prose-sm prose-neutral prose-pre:bg-card-alt prose-pre:text-ink prose-code:text-ink"
+                  />
                 </>
               );
             })()}

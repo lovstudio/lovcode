@@ -10,6 +10,7 @@ import { PersonIcon } from "@radix-ui/react-icons";
 import { GlobalHeader } from "../components/GlobalHeader";
 import { GlobalChatSearch } from "../components/GlobalChatSearch";
 import { StatusBar } from "../components/StatusBar";
+import { ChatFilePreviewProvider } from "../views/Chat/FilePreviewContext";
 import { setAutoCopyOnSelect, getAutoCopyOnSelect } from "../components/Terminal";
 import { Switch } from "../components/ui/switch";
 import { Avatar, AvatarImage, AvatarFallback } from "../components/ui/avatar";
@@ -194,9 +195,11 @@ export default function RootLayout() {
           onShowProfileDialog={() => setShowProfileDialog(true)}
           onShowSettings={() => setShowSettings(true)}
         />
-        <div className="flex-1 flex overflow-hidden">
-          <main className="flex-1 overflow-auto">
-            <Outlet />
+        <div className="flex-1 flex min-h-0 min-w-0 overflow-hidden">
+          <main className="flex-1 min-h-0 min-w-0 overflow-hidden">
+            <ChatFilePreviewProvider contentClassName="overflow-auto">
+              <Outlet />
+            </ChatFilePreviewProvider>
           </main>
         </div>
         <StatusBar />

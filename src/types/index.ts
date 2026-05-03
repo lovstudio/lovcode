@@ -103,9 +103,15 @@ export interface SessionUsageEntry {
 
 export type ContentBlock =
   | { type: "text"; text: string }
-  | { type: "tool_use"; id: string; name: string; summary: string }
-  | { type: "tool_result"; tool_use_id: string; content: string }
+  | { type: "tool_use"; id: string; name: string; summary: string; input?: string }
+  | { type: "tool_result"; tool_use_id: string; content: string; images?: ToolResultImage[]; raw?: string }
   | { type: "thinking"; thinking: string };
+
+export interface ToolResultImage {
+  media_type: string;
+  data: string;
+  original_size?: number | null;
+}
 
 export interface Message {
   uuid: string;
@@ -180,7 +186,9 @@ export interface CodexCommand {
 export interface MarketplaceMeta {
   source_id?: string | null;
   source_name?: string | null;
+  vendor?: string | null;
   author?: string | null;
+  homepage?: string | null;
   downloads?: number | null;
   template_path?: string | null;
 }
@@ -190,8 +198,21 @@ export interface LocalSkill {
   path: string;
   description: string | null;
   content: string;
-  // Marketplace metadata (if installed from marketplace)
+  home_id?: string | null;
+  home_label?: string | null;
+  home_path?: string | null;
+  installed_at?: number | null;
+  modified_at?: number | null;
+  // Marketplace metadata (if installed from marketplace). Rust currently
+  // flattens these fields, while older callers may still expect nesting.
   marketplace?: MarketplaceMeta | null;
+  source_id?: string | null;
+  source_name?: string | null;
+  vendor?: string | null;
+  author?: string | null;
+  homepage?: string | null;
+  downloads?: number | null;
+  template_path?: string | null;
 }
 
 export interface DistillDocument {

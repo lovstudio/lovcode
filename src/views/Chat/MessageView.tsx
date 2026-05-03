@@ -74,7 +74,7 @@ export function MessageView({ projectId, projectPath, sessionId, summary: initia
   };
 
   const filteredMessages = useMemo(
-    () => (originalChat ? messages.filter((m) => !m.is_meta && !m.is_tool) : messages),
+    () => (originalChat ? messages.filter((m) => !m.is_meta) : messages),
     [messages, originalChat]
   );
 
@@ -175,8 +175,8 @@ export function MessageView({ projectId, projectPath, sessionId, summary: initia
                   </DropdownMenuContent>
                 </DropdownMenu>
                 <p className="text-xs text-muted-foreground-foreground mb-2 uppercase tracking-wide">{msg.role}</p>
-                {msg.content_blocks && !originalChat ? (
-                  <ContentBlockRenderer blocks={msg.content_blocks} markdown={markdownPreview} cwd={projectPath} />
+                {msg.content_blocks ? (
+                  <ContentBlockRenderer blocks={msg.content_blocks} markdown={markdownPreview} cwd={projectPath} transformText={processContent} />
                 ) : (
                   <CollapsibleContent content={displayContent} markdown={markdownPreview} cwd={projectPath} />
                 )}

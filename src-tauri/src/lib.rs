@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
 use std::sync::LazyLock;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::{self, Value as TantivyValue, *};
@@ -236,14 +236,28 @@ pub enum ContentBlock {
         id: String,
         name: String,
         summary: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        input: Option<String>,
     },
     #[serde(rename = "tool_result")]
     ToolResult {
         tool_use_id: String,
         content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        images: Option<Vec<ToolResultImage>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        raw: Option<String>,
     },
     #[serde(rename = "thinking")]
     Thinking { thinking: String },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ToolResultImage {
+    pub media_type: String,
+    pub data: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_size: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -358,6 +372,88 @@ pub struct ClaudeSettings {
 
 fn get_claude_dir() -> PathBuf {
     dirs::home_dir().unwrap().join(".claude")
+}
+
+#[derive(Debug, Clone)]
+struct SkillHome {
+    id: &'static str,
+    label: &'static str,
+    path: PathBuf,
+}
+
+fn get_skill_home_candidates() -> Vec<SkillHome> {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+
+    vec![
+        SkillHome {
+            id: "agent",
+            label: "~/.agent",
+            path: home.join(".agent"),
+        },
+        SkillHome {
+            id: "agents",
+            label: "~/.agents",
+            path: home.join(".agents"),
+        },
+        SkillHome {
+            id: "claude",
+            label: "~/.claude",
+            path: get_claude_dir(),
+        },
+    ]
+}
+
+fn get_readable_skill_homes() -> Vec<SkillHome> {
+    get_skill_home_candidates()
+        .into_iter()
+        .filter(|home| home.path.join("skills").is_dir())
+        .collect()
+}
+
+fn get_preferred_skill_home() -> SkillHome {
+    let candidates = get_skill_home_candidates();
+
+    if let Some(home) = candidates
+        .iter()
+        .find(|home| home.path.is_dir() && home.path.join("skills").is_dir())
+    {
+        return (*home).clone();
+    }
+
+    if let Some(home) = candidates
+        .iter()
+        .take(2)
+        .find(|home| home.path.is_dir() || !home.path.exists())
+    {
+        return (*home).clone();
+    }
+
+    if let Some(home) = candidates.iter().find(|home| home.path.is_dir()) {
+        return (*home).clone();
+    }
+
+    candidates
+        .into_iter()
+        .find(|home| !home.path.exists())
+        .unwrap_or_else(|| SkillHome {
+            id: "agents",
+            label: "~/.agents",
+            path: dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".agents"),
+        })
+}
+
+fn find_skill_home(name: &str) -> Option<SkillHome> {
+    get_readable_skill_homes()
+        .into_iter()
+        .find(|home| home.path.join("skills").join(name).join("SKILL.md").exists())
+}
+
+fn system_time_to_millis(time: SystemTime) -> Option<u64> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis() as u64)
 }
 
 fn get_lovstudio_dir() -> PathBuf {
@@ -2340,13 +2436,25 @@ async fn get_session_messages(
                     }
                     let (content, is_tool) = extract_content_with_meta(&msg.content);
                     let content_blocks = extract_content_blocks(&msg.content);
+                    let has_content_blocks = content_blocks
+                        .as_ref()
+                        .map(|blocks| !blocks.is_empty())
+                        .unwrap_or(false);
+                    let display_content = if content.is_empty() {
+                        content_blocks
+                            .as_deref()
+                            .map(content_blocks_to_text)
+                            .unwrap_or_default()
+                    } else {
+                        content
+                    };
                     let is_meta = parsed.is_meta.unwrap_or(false);
 
-                    if !content.is_empty() {
+                    if !display_content.is_empty() || has_content_blocks {
                         messages.push(Message {
                             uuid: parsed.uuid.unwrap_or_default(),
                             role,
-                            content,
+                            content: display_content,
                             timestamp: parsed.timestamp.unwrap_or_default(),
                             is_meta,
                             is_tool,
@@ -2686,14 +2794,30 @@ fn summarize_tool_input(name: &str, input: &serde_json::Value) -> String {
         Some(o) => o,
         None => return String::new(),
     };
+    let first_string = |keys: &[&str]| -> String {
+        for key in keys {
+            if let Some(v) = obj.get(*key).and_then(|v| v.as_str()) {
+                if !v.is_empty() {
+                    return v.to_string();
+                }
+            }
+        }
+        String::new()
+    };
+
     match name {
         "Read" | "Write" => obj
             .get("file_path")
             .and_then(|v| v.as_str())
+            .or_else(|| obj.get("path").and_then(|v| v.as_str()))
             .unwrap_or("")
             .to_string(),
-        "Edit" => {
-            let path = obj.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+        "Edit" | "MultiEdit" => {
+            let path = obj
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .or_else(|| obj.get("path").and_then(|v| v.as_str()))
+                .unwrap_or("");
             let old = obj.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
             if old.is_empty() {
                 path.to_string()
@@ -2720,11 +2844,7 @@ fn summarize_tool_input(name: &str, input: &serde_json::Value) -> String {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
-        "Task" => obj
-            .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
+        "Task" => first_string(&["description", "subject", "prompt"]),
         "WebFetch" => obj
             .get("url")
             .and_then(|v| v.as_str())
@@ -2735,9 +2855,41 @@ fn summarize_tool_input(name: &str, input: &serde_json::Value) -> String {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
+        "ToolSearch" => first_string(&["query"]),
+        "Skill" => {
+            let skill = first_string(&["skill", "name"]);
+            let args = first_string(&["args", "prompt", "description"]);
+            if skill.is_empty() {
+                args
+            } else if args.is_empty() {
+                skill
+            } else {
+                format!("{} {}", skill, args)
+            }
+        }
+        "Agent" => first_string(&["description", "subagent_type", "prompt"]),
+        "TaskCreate" => first_string(&["subject", "activeForm", "description"]),
+        "TaskUpdate" => {
+            let id = first_string(&["taskId", "id"]);
+            let status = first_string(&["status"]);
+            match (id.is_empty(), status.is_empty()) {
+                (false, false) => format!("{} -> {}", id, status),
+                (false, true) => id,
+                (true, false) => status,
+                (true, true) => String::new(),
+            }
+        }
+        "TaskList" => "tasks".to_string(),
+        "TaskStop" => first_string(&["taskId", "id", "reason"]),
+        "TodoWrite" | "TaskRead" => first_string(&["description", "subject", "prompt"]),
+        "AskUserQuestion" => first_string(&["question", "header", "description"]),
         _ => {
             // Try common field names
             for key in &[
+                "skill",
+                "name",
+                "subject",
+                "title",
                 "file_path",
                 "path",
                 "command",
@@ -2745,6 +2897,8 @@ fn summarize_tool_input(name: &str, input: &serde_json::Value) -> String {
                 "pattern",
                 "url",
                 "description",
+                "prompt",
+                "args",
             ] {
                 if let Some(v) = obj.get(*key).and_then(|v| v.as_str()) {
                     return v.to_string();
@@ -2755,21 +2909,195 @@ fn summarize_tool_input(name: &str, input: &serde_json::Value) -> String {
     }
 }
 
+fn truncate_chars(text: String, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text;
+    }
+    let mut out = text.chars().take(max_chars).collect::<String>();
+    out.push_str("\n... truncated ...");
+    out
+}
+
+fn json_preview(value: &serde_json::Value, max_chars: usize) -> String {
+    let text = match value {
+        serde_json::Value::String(s) => s.clone(),
+        _ => serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
+    };
+    truncate_chars(text, max_chars)
+}
+
+fn tool_action_text(name: &str) -> &str {
+    match name {
+        "Read" => "Read",
+        "Write" => "Wrote",
+        "Edit" | "MultiEdit" => "Edited",
+        "Bash" => "Ran",
+        "Grep" | "Glob" | "WebSearch" => "Searched",
+        "WebFetch" => "Fetched",
+        "ToolSearch" => "Searched tools",
+        "Skill" => "Used skill",
+        "Agent" => "Started agent",
+        "TaskCreate" => "Created task",
+        "TaskUpdate" => "Updated task",
+        "TaskList" => "Listed tasks",
+        "TaskStop" => "Stopped task",
+        "TodoWrite" | "Task" | "TaskRead" => "Updated tasks",
+        "AskUserQuestion" => "Asked user",
+        "EnterPlanMode" => "Entered plan mode",
+        "ExitPlanMode" => "Exited plan mode",
+        "ScheduleWakeup" => "Scheduled wakeup",
+        "Monitor" => "Started monitor",
+        _ => name,
+    }
+}
+
+fn content_blocks_to_text(blocks: &[ContentBlock]) -> String {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }
+            ContentBlock::ToolUse { name, summary, .. } => {
+                let action = tool_action_text(name);
+                let trimmed = summary.trim();
+                if trimmed.is_empty() {
+                    Some(action.to_string())
+                } else {
+                    Some(format!("{} {}", action, trimmed))
+                }
+            }
+            ContentBlock::ToolResult { content, .. } => {
+                let trimmed = content.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }
+            ContentBlock::Thinking { thinking } => {
+                let trimmed = thinking.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn summarize_tool_result_item(value: &serde_json::Value) -> Option<String> {
+    let obj = value.as_object()?;
+    match obj.get("type").and_then(|v| v.as_str()) {
+        Some("text") => obj
+            .get("text")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        Some("tool_reference") => obj
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .map(|name| format!("tool_reference: {}", name)),
+        Some("image") => Some("[image result]".to_string()),
+        Some(other) => Some(format!("{}: {}", other, json_preview(value, 800))),
+        None => Some(json_preview(value, 800)),
+    }
+}
+
+fn tool_result_raw_preview(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(_) => None,
+        serde_json::Value::Array(arr) => {
+            let lines = arr
+                .iter()
+                .filter_map(|item| {
+                    let obj = item.as_object()?;
+                    match obj.get("type").and_then(|v| v.as_str()) {
+                        Some("text") => None,
+                        Some("image") => Some("[image result: base64 omitted]".to_string()),
+                        _ => summarize_tool_result_item(item),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if lines.trim().is_empty() {
+                None
+            } else {
+                Some(lines)
+            }
+        }
+        serde_json::Value::Object(_) => Some(json_preview(value, 6000)),
+        _ => None,
+    }
+}
+
+fn extract_tool_result_images(value: &serde_json::Value) -> Option<Vec<ToolResultImage>> {
+    let serde_json::Value::Array(arr) = value else {
+        return None;
+    };
+
+    let images = arr
+        .iter()
+        .filter_map(|item| {
+            let obj = item.as_object()?;
+            if obj.get("type").and_then(|v| v.as_str()) != Some("image") {
+                return None;
+            }
+
+            let source = obj.get("source")?.as_object()?;
+            if source.get("type").and_then(|v| v.as_str()) != Some("base64") {
+                return None;
+            }
+
+            let data = source.get("data").and_then(|v| v.as_str())?.to_string();
+            if data.is_empty() {
+                return None;
+            }
+
+            let media_type = source
+                .get("media_type")
+                .and_then(|v| v.as_str())
+                .or_else(|| obj.get("media_type").and_then(|v| v.as_str()))
+                .filter(|s| s.starts_with("image/"))
+                .unwrap_or("image/png")
+                .to_string();
+            let original_size = source
+                .get("originalSize")
+                .and_then(|v| v.as_u64())
+                .or_else(|| source.get("original_size").and_then(|v| v.as_u64()))
+                .or_else(|| obj.get("originalSize").and_then(|v| v.as_u64()))
+                .or_else(|| obj.get("original_size").and_then(|v| v.as_u64()));
+
+            Some(ToolResultImage {
+                media_type,
+                data,
+                original_size,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if images.is_empty() {
+        None
+    } else {
+        Some(images)
+    }
+}
+
 fn extract_tool_result_content(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(s) => s.clone(),
         serde_json::Value::Array(arr) => arr
             .iter()
-            .filter_map(|item| {
-                let obj = item.as_object()?;
-                if obj.get("type").and_then(|v| v.as_str()) == Some("text") {
-                    obj.get("text").and_then(|v| v.as_str()).map(String::from)
-                } else {
-                    None
-                }
-            })
+            .filter_map(summarize_tool_result_item)
             .collect::<Vec<_>>()
             .join("\n"),
+        serde_json::Value::Object(_) => json_preview(value, 1200),
         _ => String::new(),
     }
 }
@@ -2810,7 +3138,17 @@ fn extract_content_blocks(value: &Option<serde_json::Value>) -> Option<Vec<Conte
                         .to_string();
                     let input = obj.get("input").cloned().unwrap_or(serde_json::Value::Null);
                     let summary = summarize_tool_input(&name, &input);
-                    Some(ContentBlock::ToolUse { id, name, summary })
+                    let input = if input.is_null() {
+                        None
+                    } else {
+                        Some(json_preview(&input, 6000))
+                    };
+                    Some(ContentBlock::ToolUse {
+                        id,
+                        name,
+                        summary,
+                        input,
+                    })
                 }
                 "tool_result" => {
                     let tool_use_id = obj
@@ -2822,9 +3160,17 @@ fn extract_content_blocks(value: &Option<serde_json::Value>) -> Option<Vec<Conte
                         .get("content")
                         .map(|v| extract_tool_result_content(v))
                         .unwrap_or_default();
+                    let images = obj.get("content").and_then(extract_tool_result_images);
+                    let raw = obj.get("content").and_then(tool_result_raw_preview);
+                    let raw = raw.filter(|s| {
+                        let trimmed = s.trim();
+                        !trimmed.is_empty() && trimmed != content.trim()
+                    });
                     Some(ContentBlock::ToolResult {
                         tool_use_id,
                         content,
+                        images,
+                        raw,
                     })
                 }
                 "thinking" => {
@@ -3708,7 +4054,11 @@ pub struct MarketplaceMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub homepage: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub downloads: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3721,50 +4071,121 @@ pub struct LocalSkill {
     pub path: String,
     pub description: Option<String>,
     pub content: String,
+    pub home_id: String,
+    pub home_label: String,
+    pub home_path: String,
+    pub installed_at: Option<u64>,
+    pub modified_at: Option<u64>,
     // Marketplace metadata (if installed from marketplace)
     #[serde(flatten)]
     pub marketplace: Option<MarketplaceMeta>,
 }
 
-#[tauri::command]
-fn list_local_skills() -> Result<Vec<LocalSkill>, String> {
-    let skills_dir = get_claude_dir().join("skills");
+fn frontmatter_value(frontmatter: &HashMap<String, String>, key: &str) -> Option<String> {
+    frontmatter.get(key).and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
 
-    if !skills_dir.exists() {
-        return Ok(vec![]);
+fn merge_skill_marketplace_meta(
+    marketplace: Option<MarketplaceMeta>,
+    frontmatter: &HashMap<String, String>,
+) -> Option<MarketplaceMeta> {
+    let mut meta = marketplace.unwrap_or_default();
+
+    if meta.vendor.is_none() {
+        meta.vendor = frontmatter_value(frontmatter, "vendor")
+            .or_else(|| frontmatter_value(frontmatter, "source"));
     }
 
+    if meta.author.is_none() {
+        meta.author = frontmatter_value(frontmatter, "author");
+    }
+
+    if meta.homepage.is_none() {
+        meta.homepage = frontmatter_value(frontmatter, "homepage");
+    }
+
+    if meta.source_name.is_none() {
+        meta.source_name = meta.vendor.clone();
+    }
+
+    if meta.source_id.is_some()
+        || meta.source_name.is_some()
+        || meta.vendor.is_some()
+        || meta.author.is_some()
+        || meta.homepage.is_some()
+        || meta.downloads.is_some()
+        || meta.template_path.is_some()
+    {
+        Some(meta)
+    } else {
+        None
+    }
+}
+
+#[tauri::command]
+fn list_local_skills() -> Result<Vec<LocalSkill>, String> {
     let mut skills = Vec::new();
+    let mut seen_names = std::collections::HashSet::new();
 
-    for entry in fs::read_dir(&skills_dir).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path();
+    for home in get_readable_skill_homes() {
+        let skills_dir = home.path.join("skills");
 
-        if path.is_dir() {
-            let skill_name = path.file_name().unwrap().to_string_lossy().to_string();
-            let skill_md = path.join("SKILL.md");
+        for entry in fs::read_dir(&skills_dir).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
 
-            if skill_md.exists() {
-                let content = fs::read_to_string(&skill_md).unwrap_or_default();
-                let (frontmatter, _, _) = parse_frontmatter(&content);
+            if path.is_dir() {
+                let skill_name = path.file_name().unwrap().to_string_lossy().to_string();
+                let skill_md = path.join("SKILL.md");
 
-                // Load marketplace metadata if exists
-                let meta_path = path.join(".meta.json");
-                let marketplace = if meta_path.exists() {
-                    fs::read_to_string(&meta_path)
+                if skill_md.exists() && seen_names.insert(skill_name.clone()) {
+                    let content = fs::read_to_string(&skill_md).unwrap_or_default();
+                    let (frontmatter, _, _) = parse_frontmatter(&content);
+
+                    // Load marketplace metadata if exists
+                    let meta_path = path.join(".meta.json");
+                    let marketplace = if meta_path.exists() {
+                        fs::read_to_string(&meta_path)
+                            .ok()
+                            .and_then(|s| serde_json::from_str::<MarketplaceMeta>(&s).ok())
+                    } else {
+                        None
+                    };
+                    let marketplace = merge_skill_marketplace_meta(marketplace, &frontmatter);
+                    let installed_at = fs::metadata(&path)
                         .ok()
-                        .and_then(|s| serde_json::from_str::<MarketplaceMeta>(&s).ok())
-                } else {
-                    None
-                };
+                        .and_then(|metadata| {
+                            metadata
+                                .created()
+                                .or_else(|_| metadata.modified())
+                                .ok()
+                        })
+                        .and_then(system_time_to_millis);
+                    let modified_at = fs::metadata(&skill_md)
+                        .ok()
+                        .and_then(|metadata| metadata.modified().ok())
+                        .and_then(system_time_to_millis);
 
-                skills.push(LocalSkill {
-                    name: skill_name,
-                    path: skill_md.to_string_lossy().to_string(),
-                    description: frontmatter.get("description").cloned(),
-                    content, // Return raw content with frontmatter for frontend display
-                    marketplace,
-                });
+                    skills.push(LocalSkill {
+                        name: skill_name,
+                        path: skill_md.to_string_lossy().to_string(),
+                        description: frontmatter.get("description").cloned(),
+                        content, // Return raw content with frontmatter for frontend display
+                        home_id: home.id.to_string(),
+                        home_label: home.label.to_string(),
+                        home_path: home.path.to_string_lossy().to_string(),
+                        installed_at,
+                        modified_at,
+                        marketplace,
+                    });
+                }
             }
         }
     }
@@ -5664,7 +6085,7 @@ fn install_command_template(name: String, content: String) -> Result<String, Str
     Ok(file_path.to_string_lossy().to_string())
 }
 
-/// Install a skill template to ~/.claude/skills/{name}/SKILL.md
+/// Install a skill template to the active agent skills home.
 #[tauri::command]
 fn install_skill_template(
     name: String,
@@ -5682,8 +6103,10 @@ fn install_skill_template(
         return Err("Skill name contains invalid characters".to_string());
     }
 
-    // Create directory structure: ~/.claude/skills/{name}/
-    let skill_dir = get_claude_dir().join("skills").join(&name);
+    // Update an existing skill in-place. New installs use the preferred agent
+    // skills home: ~/.agent, ~/.agents, then legacy ~/.claude.
+    let skill_home = find_skill_home(&name).unwrap_or_else(get_preferred_skill_home);
+    let skill_dir = skill_home.path.join("skills").join(&name);
     fs::create_dir_all(&skill_dir)
         .map_err(|e| format!("Failed to create skill directory: {}", e))?;
 
@@ -5696,7 +6119,9 @@ fn install_skill_template(
         let meta = MarketplaceMeta {
             source_id,
             source_name,
+            vendor: None,
             author,
+            homepage: None,
             downloads,
             template_path,
         };
@@ -5716,20 +6141,23 @@ fn uninstall_skill(name: String) -> Result<String, String> {
         return Err("Skill name cannot be empty".to_string());
     }
 
-    let skill_dir = get_claude_dir().join("skills").join(&name);
+    let Some(skill_home) = find_skill_home(&name) else {
+        return Err(format!("Skill '{}' not found", name));
+    };
+
+    let skill_dir = skill_home.path.join("skills").join(&name);
     if !skill_dir.exists() {
         return Err(format!("Skill '{}' not found", name));
     }
 
     fs::remove_dir_all(&skill_dir).map_err(|e| format!("Failed to remove skill: {}", e))?;
-    Ok(format!("Uninstalled skill: {}", name))
+    Ok(format!("Uninstalled skill: {} from {}", name, skill_home.label))
 }
 
 /// Check if a skill is already installed
 #[tauri::command]
 fn check_skill_installed(name: String) -> bool {
-    let skill_file = get_claude_dir().join("skills").join(&name).join("SKILL.md");
-    skill_file.exists()
+    find_skill_home(&name).is_some()
 }
 
 #[tauri::command]
@@ -7266,6 +7694,25 @@ struct PathCheckResult {
     is_dir: bool,
 }
 
+#[derive(Serialize, Clone)]
+struct PathCandidateResult {
+    path: String,
+    source: String,
+    is_dir: bool,
+    full_match: bool,
+    exists: bool,
+}
+
+#[derive(Serialize)]
+struct PathResolveResult {
+    raw: String,
+    resolved: String,
+    is_dir: bool,
+    exists: bool,
+    candidates: Vec<PathCandidateResult>,
+    warning: Option<String>,
+}
+
 #[tauri::command]
 fn check_paths_exist(paths: Vec<String>, cwd: Option<String>) -> Vec<PathCheckResult> {
     let home = dirs::home_dir();
@@ -7304,6 +7751,325 @@ fn check_paths_exist(paths: Vec<String>, cwd: Option<String>) -> Vec<PathCheckRe
             })
         })
         .collect()
+}
+
+fn normalize_path_input(raw: &str) -> String {
+    raw.trim()
+        .trim_end_matches([',', '.', ';', ':', ')', ']'])
+        .to_string()
+}
+
+fn expand_user_path(raw: &str, cwd: Option<&std::path::PathBuf>) -> Option<std::path::PathBuf> {
+    let home = dirs::home_dir();
+
+    if raw.starts_with("~/") || raw == "~" {
+        let home = home.as_ref()?;
+        if raw == "~" {
+            Some(home.clone())
+        } else {
+            Some(home.join(&raw[2..]))
+        }
+    } else if raw.starts_with('/') {
+        Some(std::path::PathBuf::from(raw))
+    } else {
+        cwd.map(|base| base.join(raw))
+    }
+}
+
+fn path_metadata_candidate(
+    path: std::path::PathBuf,
+    source: &str,
+    full_match: bool,
+) -> Option<PathCandidateResult> {
+    let metadata = fs::metadata(&path).ok()?;
+    let canonical = fs::canonicalize(&path).unwrap_or(path);
+
+    Some(PathCandidateResult {
+        path: canonical.to_string_lossy().to_string(),
+        source: source.to_string(),
+        is_dir: metadata.is_dir(),
+        full_match,
+        exists: true,
+    })
+}
+
+fn push_path_candidate(
+    candidates: &mut Vec<PathCandidateResult>,
+    path: std::path::PathBuf,
+    source: &str,
+    full_match: bool,
+) {
+    if let Some(candidate) = path_metadata_candidate(path, source, full_match) {
+        candidates.push(candidate);
+    }
+}
+
+fn push_path_option(
+    candidates: &mut Vec<PathCandidateResult>,
+    path: std::path::PathBuf,
+    source: &str,
+    full_match: bool,
+) {
+    if let Some(candidate) = path_metadata_candidate(path.clone(), source, full_match) {
+        candidates.push(candidate);
+        return;
+    }
+
+    candidates.push(PathCandidateResult {
+        path: path.to_string_lossy().to_string(),
+        source: source.to_string(),
+        is_dir: false,
+        full_match,
+        exists: false,
+    });
+}
+
+fn path_tail_variants(path: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let components: Vec<String> = path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect();
+
+    let mut variants = Vec::new();
+    for count in (1..=std::cmp::min(4, components.len())).rev() {
+        let mut tail = std::path::PathBuf::new();
+        for part in &components[components.len() - count..] {
+            tail.push(part);
+        }
+        variants.push(tail);
+    }
+    variants
+}
+
+struct CandidateRoot {
+    label: String,
+    path: std::path::PathBuf,
+}
+
+fn candidate_roots(
+    cwd: Option<&std::path::PathBuf>,
+    home: Option<&std::path::PathBuf>,
+) -> Vec<CandidateRoot> {
+    let mut roots = Vec::new();
+
+    if let Some(cwd) = cwd {
+        let mut depth = 0usize;
+        let mut current = Some(cwd.as_path());
+        while let Some(path) = current {
+            roots.push(CandidateRoot {
+                label: if depth == 0 {
+                    "cwd".to_string()
+                } else {
+                    format!("cwd parent {}", depth)
+                },
+                path: path.to_path_buf(),
+            });
+            if home.map(|h| h.as_path() == path).unwrap_or(false) {
+                break;
+            }
+            depth += 1;
+            current = path.parent();
+        }
+    }
+
+    if let Some(home) = home {
+        roots.extend([
+            CandidateRoot { label: "home".to_string(), path: home.clone() },
+            CandidateRoot { label: "~/.agents".to_string(), path: home.join(".agents") },
+            CandidateRoot { label: "~/.agents/skills".to_string(), path: home.join(".agents").join("skills") },
+            CandidateRoot { label: "~/.agent".to_string(), path: home.join(".agent") },
+            CandidateRoot { label: "~/.claude".to_string(), path: home.join(".claude") },
+            CandidateRoot { label: "~/.codex".to_string(), path: home.join(".codex") },
+            CandidateRoot { label: "~/.cache".to_string(), path: home.join(".cache") },
+            CandidateRoot { label: "~/.local".to_string(), path: home.join(".local") },
+        ]);
+    }
+    roots.push(CandidateRoot { label: "temp".to_string(), path: std::env::temp_dir() });
+
+    let mut seen = std::collections::HashSet::new();
+    roots.retain(|root| seen.insert(root.path.to_string_lossy().to_string()) && root.path.is_dir());
+    roots
+}
+
+fn semantic_path_tail(
+    normalized: &str,
+    expanded: &std::path::Path,
+    home: Option<&std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    if let Some(rest) = normalized.strip_prefix("~/") {
+        return Some(std::path::PathBuf::from(rest));
+    }
+
+    if let Some(home) = home {
+        if let Ok(rest) = expanded.strip_prefix(home) {
+            if !rest.as_os_str().is_empty() {
+                return Some(rest.to_path_buf());
+            }
+        }
+    }
+
+    path_tail_variants(expanded).into_iter().next()
+}
+
+fn add_spotlight_file_candidates(
+    candidates: &mut Vec<PathCandidateResult>,
+    leaf_name: &str,
+    tail_variants: &[std::path::PathBuf],
+) {
+    #[cfg(target_os = "macos")]
+    {
+        if leaf_name.is_empty() {
+            return;
+        }
+
+        let output = std::process::Command::new("/usr/bin/mdfind")
+            .args([
+                "-onlyin",
+                "/Users",
+                &format!(
+                    "kMDItemFSName == \"{}\"",
+                    leaf_name.replace('"', "\\\"")
+                ),
+            ])
+            .output();
+
+        let Ok(output) = output else {
+            return;
+        };
+        if !output.status.success() {
+            return;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines().take(80) {
+            let path = std::path::PathBuf::from(line.trim());
+            if !path.exists() {
+                continue;
+            }
+            let full_match = tail_variants.iter().any(|tail| path.ends_with(tail));
+            push_path_candidate(candidates, path, "spotlight", full_match);
+        }
+    }
+}
+
+fn resolve_path_candidate(raw: String, cwd_path: Option<&std::path::PathBuf>) -> PathResolveResult {
+    let normalized = normalize_path_input(&raw);
+    let home = dirs::home_dir();
+    let expanded = expand_user_path(&normalized, cwd_path);
+    let mut candidates = Vec::new();
+
+    if let Some(path) = expanded.as_ref() {
+        push_path_candidate(&mut candidates, path.clone(), "exact", true);
+    }
+
+    if candidates.is_empty() {
+        if let (Some(cwd), Some(rest)) = (cwd_path, normalized.strip_prefix("~/")) {
+            push_path_candidate(&mut candidates, cwd.join(rest), "cwd-prefix", true);
+        }
+
+        if let Some(path) = expanded.as_ref() {
+            let tails = path_tail_variants(path);
+            let roots = candidate_roots(cwd_path, home.as_ref());
+            if let Some(tail) = semantic_path_tail(&normalized, path, home.as_ref()) {
+                for root in &roots {
+                    push_path_option(
+                        &mut candidates,
+                        root.path.join(&tail),
+                        &format!("prefix: {}", root.label),
+                        true,
+                    );
+                }
+            }
+
+            for root in roots {
+                for (index, tail) in tails.iter().enumerate() {
+                    push_path_candidate(
+                        &mut candidates,
+                        root.path.join(tail),
+                        &format!("prefix: {}", root.label),
+                        index <= 1,
+                    );
+                }
+            }
+
+            if let Some(leaf) = path.file_name().and_then(|value| value.to_str()) {
+                add_spotlight_file_candidates(&mut candidates, leaf, &tails);
+            }
+        }
+    }
+
+    candidates.sort_by(|a, b| {
+        let priority = |source: &str| match source {
+            "exact" => 0,
+            "cwd-prefix" => 1,
+            source if source.starts_with("prefix:") => 2,
+            "spotlight" => 3,
+            _ => 9,
+        };
+        b.exists
+            .cmp(&a.exists)
+            .then_with(|| b.full_match
+            .cmp(&a.full_match)
+            )
+            .then_with(|| priority(&a.source).cmp(&priority(&b.source)))
+            .then_with(|| a.path.len().cmp(&b.path.len()))
+    });
+
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|candidate| seen.insert(candidate.path.clone()));
+    candidates.truncate(12);
+
+    if let Some(best) = candidates.iter().find(|candidate| candidate.exists) {
+        let exact = best.source == "exact";
+        return PathResolveResult {
+            raw: normalized,
+            resolved: best.path.clone(),
+            is_dir: best.is_dir,
+            exists: true,
+            candidates,
+            warning: if exact {
+                None
+            } else {
+                Some("Original path was not found; using the best matching candidate.".to_string())
+            },
+        };
+    }
+
+    let resolved = expanded
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_else(|| normalized.clone());
+
+    PathResolveResult {
+        raw: normalized,
+        resolved,
+        is_dir: false,
+        exists: false,
+        candidates,
+        warning: Some("Path not found.".to_string()),
+    }
+}
+
+#[tauri::command]
+async fn resolve_path_candidates(
+    paths: Vec<String>,
+    cwd: Option<String>,
+) -> Result<Vec<PathResolveResult>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let cwd_path = cwd
+            .as_ref()
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from);
+
+        Ok(paths
+            .into_iter()
+            .map(|raw| resolve_path_candidate(raw, cwd_path.as_ref()))
+            .collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[derive(Serialize)]
@@ -11809,6 +12575,7 @@ pub fn run() {
             reveal_path,
             open_path,
             check_paths_exist,
+            resolve_path_candidates,
             migrate_session_cwd,
             find_relocation_candidates,
             get_session_file_path,

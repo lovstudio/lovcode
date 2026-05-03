@@ -163,7 +163,13 @@ jobs:
           VERSION="${{ steps.get-tag.outputs.tag }}"
           VERSION="${VERSION#v}"  # Remove 'v' prefix
           # Extract content between current version header and next version header
-          CHANGELOG=$(awk "/^## ${VERSION}\$/{found=1; next} found && /^## /{exit} found" CHANGELOG.md)
+          CHANGELOG=$(awk -v ver="$VERSION" '
+            /^## / {
+              if (found) exit
+              if ($2 == ver) { found=1; next }
+            }
+            found { print }
+          ' CHANGELOG.md)
           # Handle multi-line output
           echo "content<<EOF" >> $GITHUB_OUTPUT
           echo "$CHANGELOG" >> $GITHUB_OUTPUT
