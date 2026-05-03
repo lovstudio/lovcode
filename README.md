@@ -35,14 +35,17 @@
 
 ## Release Highlights
 
-### v0.29.0 — Vendors, Tokens & Inline Model Picker
+### v0.31.0 — Page-Centric Refactor
 
-MaaS registry reshaped around a new `Vendor` entity (model trainer) distinct from `Provider` (access platform), tokens stored inline with a verified-fingerprint stamp, and an inline provider/model picker pinned to the chat input.
+Workspace dashboard removed in favor of a flat, page-centric router. `/chat/*` is now `/history/*`; knowledge sources moved from a static reference page to dynamic `/knowledge/source/[id]` routes. Session list streams instead of blocking on a full scan, and the splash now waits for the first list page to actually be ready.
 
 <img src="docs/images/claude-ai-import.png" alt="Claude.ai Import" width="100%">
 
 | Version | Highlights |
 |---------|------------|
+| **0.31.0** | Architecture refactor: removed Workspace dashboard (PanelGrid, FeatureTabs, KanbanBoard, GitHistory, LogoManager, ProjectDashboard) in favor of page-centric routing; `/chat/*` → `/history/*`; `/knowledge/reference` (static) → `/knowledge/source/[id]` (dynamic) with `[...docPath]` sub-routes; new `useStreamedSessions` hook for streamed session list rendering; splash now waits for `/history` `ProjectList` `app:ready` signal before dismissing; LLM provider settings page removed |
+| **0.30.1** | Patch: silence dev-mode `[TAURI] Couldn't find callback id` warnings — defer `get_network_info` to next macrotask, persist `NETWORK_INFO_CACHE` to `~/.lovstudio/lovcode/cache/network.json` so dev restarts keep the cache; annual-report-2025 no longer recorded as `lastPath` resume target |
+| **0.30.0** | Chat session list & global search overhaul: `readLiteMetadata`-aligned head/tail 64KB title scanner with `title_source` field surfaced as a multi-purpose dot in the list (custom black / AI terracotta / summary blue / slug green / prompt grey / none faded); fix consecutive same-role user messages being merged; built-in slash commands (`/clear`, etc.) now format correctly even with reordered `<command-name>` tags; new `GlobalChatSearch` overlay + `search-overlay` route for cross-session full-text search; double-click a user prompt opens it in a standalone `prompt-detail` webview; Recent header toolbar always visible (`SlidersHorizontal` icon); session metadata extraction switched from full-JSON parse to byte-level scan, dramatically faster on tens-of-MB sessions |
 | **0.29.0** | MaaS registry: new `Vendor` entity separates model vendors (anthropic/openai) from access platforms (zenmux/modelgate); tokens now stored inline (migrated from `authEnvKey`) with a verified-fingerprint stamp; models gain description / icon / modalities / context-window metadata; `fetchCommand` for remote model-list pull; Settings/MaaS view rewritten; inline provider/model picker in the chat input footer with a 5-slot MRU persisted across sessions |
 | **0.28.0** | Session detail footer shows provider · model · peak context-window occupancy (input + cache aggregate); `messages` count switched to `rounds` (user prompts only); markdown `[text](path)` links resolve through smart PathLink (existence-checked + context menu); router restores last page on reload instead of forcing Dashboard |
 | **0.27.0** | Data source split into `cli` / `app-code` / `app-web` / `app-cowork` with two-level tabs; bottom inline input to continue a session; merge consecutive same-role messages; GFM tables + code-block syntax highlighting in chat |
@@ -113,7 +116,7 @@ pnpm tauri build
 ## Usage
 
 1. Launch Lovcode
-2. Select **Chat** — sidebar shows Pinned / Recent / Import; ⌘K to search
+2. Select **History** — sidebar shows Pinned / Recent / Import; ⌘K to search (or open Global Chat Search via the configured hotkey)
 3. Use the two-level tabs to switch data source: `cli` / `app-code` / `app-web` / `app-cowork`
 4. Open a session: tool calls / thinking / GFM tables / code blocks render inline; reply at the bottom to continue
 5. Live-sync claude.ai web chats from your logged-in browser, or import a `.zip` / folder export
