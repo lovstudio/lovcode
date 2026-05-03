@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { useRef } from "react";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -8,10 +9,13 @@ import {
 } from "../../components/ui/context-menu";
 import { toast } from "../../components/ui/toast";
 import type { PathHit } from "./pathDetection";
+import { useFilePreview } from "./FilePreviewContext";
 
 interface PathLinkProps {
   text: string;
   hit: PathHit;
+  line?: number;
+  column?: number;
 }
 
 function handleErr(action: string, path: string) {
@@ -22,10 +26,30 @@ function handleErr(action: string, path: string) {
   };
 }
 
-export function PathLink({ text, hit }: PathLinkProps) {
-  const open = () => {
+export function PathLink({ text, hit, line, column }: PathLinkProps) {
+  const filePreview = useFilePreview();
+  const triggerRef = useRef<HTMLSpanElement>(null);
+
+  const openExternal = () => {
     invoke("open_path", { path: hit.resolved }).catch(handleErr("打开", hit.resolved));
   };
+
+  const openDefault = (anchor?: HTMLElement | null) => {
+    if (!hit.isDir && filePreview) {
+      filePreview.openFilePreview(hit.resolved, anchor, { line, column });
+      return;
+    }
+    openExternal();
+  };
+
+  const openInternal = (anchor?: HTMLElement | null) => {
+    filePreview?.openFilePreview(hit.resolved, anchor, { line, column });
+  };
+
+  const open = (anchor?: HTMLElement | null) => {
+    openDefault(anchor);
+  };
+
   const reveal = () => {
     invoke("reveal_path", { path: hit.resolved }).catch(handleErr("在 Finder 中显示", hit.resolved));
   };
@@ -42,9 +66,10 @@ export function PathLink({ text, hit }: PathLinkProps) {
   return (
     <ContextMenu modal={false}>
       <ContextMenuTrigger
+        ref={triggerRef}
         onClick={(e) => {
           e.stopPropagation();
-          open();
+          open(e.currentTarget);
         }}
         className="text-primary underline decoration-dotted underline-offset-2 cursor-pointer hover:bg-primary/10 rounded px-0.5"
         title={hit.resolved}
@@ -52,7 +77,12 @@ export function PathLink({ text, hit }: PathLinkProps) {
         {text}
       </ContextMenuTrigger>
       <ContextMenuContent onCloseAutoFocus={(e) => e.preventDefault()}>
-        <ContextMenuItem onSelect={open}>
+        {!hit.isDir && filePreview && (
+          <ContextMenuItem onSelect={() => openInternal(triggerRef.current)}>
+            Open in lovcode
+          </ContextMenuItem>
+        )}
+        <ContextMenuItem onSelect={openExternal}>
           {hit.isDir ? "Open folder" : "Open with default app"}
         </ContextMenuItem>
         <ContextMenuItem onSelect={reveal}>Reveal in Finder</ContextMenuItem>

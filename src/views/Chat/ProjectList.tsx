@@ -31,7 +31,10 @@ import { useReadableText, formatTokens, inferModelInfo, resolveSessionLabel, tit
 import { useInvokeQuery, useQueryClient, useStreamedSessions } from "../../hooks";
 import { CollapsibleContent } from "./CollapsibleContent";
 import { ContentBlockRenderer } from "./ContentBlockRenderer";
+import { ChatFilePreviewProvider } from "./FilePreviewContext";
 import { HighlightText } from "./HighlightText";
+import { PathAwareText } from "./PathAwareText";
+import { usePathHits } from "./usePathHits";
 import { useCwdValidity } from "./useCwdValidity";
 import { RelocateSessionDialog } from "./RelocateSessionDialog";
 import { ProjectLogo } from "../../components/shared/ProjectLogo";
@@ -828,10 +831,12 @@ export function ProjectList({ onSelectProject, onSelectSession: _onSelectSession
       {/* Right Panel: Session Detail */}
       <div className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
         {selectedSession ? (
-          <SessionDetail
-            session={selectedSession}
-            onClose={() => setSelectedSession(null)}
-          />
+          <ChatFilePreviewProvider>
+            <SessionDetail
+              session={selectedSession}
+              onClose={() => setSelectedSession(null)}
+            />
+          </ChatFilePreviewProvider>
         ) : (
           <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
             <div className="flex-1 min-h-0 overflow-y-auto flex flex-col items-center px-8 pt-8 gap-4 text-muted-foreground text-sm">
@@ -1194,6 +1199,7 @@ const MessageGroupCard = memo(function MessageGroupCard({
   const isUser = group[0].role === "user";
   const userPromptText = isUser ? groupContent : "";
   const userPromptCompressed = isUser ? compressPromptText(userPromptText) : null;
+  const userPathHits = usePathHits(userPromptText, cwd, true);
 
   return (
     <div
@@ -1226,7 +1232,9 @@ const MessageGroupCard = memo(function MessageGroupCard({
         {isUser ? (
           userPromptCompressed ? (
             <div className="text-sm leading-relaxed text-ink select-text cursor-text">
-              <div className="whitespace-pre-wrap break-words">{userPromptCompressed.head}</div>
+              <div className="whitespace-pre-wrap break-words">
+                <PathAwareText text={userPromptCompressed.head} hits={userPathHits} highlight={highlight} />
+              </div>
               <div
                 className="my-1 flex items-center gap-2 text-[10px] text-muted-foreground/60 select-none"
                 aria-label={`${userPromptCompressed.omittedLines} 行省略，双击展开`}
@@ -1235,11 +1243,13 @@ const MessageGroupCard = memo(function MessageGroupCard({
                 <span className="font-mono">··· {userPromptCompressed.omittedLines} 行省略 · 双击展开 ···</span>
                 <span className="flex-1 border-t border-dashed border-border/60" />
               </div>
-              <div className="whitespace-pre-wrap break-words">{userPromptCompressed.tail}</div>
+              <div className="whitespace-pre-wrap break-words">
+                <PathAwareText text={userPromptCompressed.tail} hits={userPathHits} highlight={highlight} />
+              </div>
             </div>
           ) : (
             <div className="text-sm leading-relaxed text-ink whitespace-pre-wrap break-words select-text cursor-text">
-              {userPromptText}
+              <PathAwareText text={userPromptText} hits={userPathHits} highlight={highlight} />
             </div>
           )
         ) : (

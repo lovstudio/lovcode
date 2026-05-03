@@ -1,14 +1,72 @@
 import { invoke } from "@tauri-apps/api/core";
 
-// Match POSIX-style paths embedded in text. Two strategies:
+// Match POSIX-style paths embedded in text. Three strategies:
 // 1. Wrapped paths: opener + path-with-spaces + matching closer (backticks, quotes, CJK 「」 etc.)
-//    Permissive — anything goes between the matching delimiters.
-// 2. Bare paths: NO spaces allowed (whitespace terminates) to avoid greedy matches in prose.
+//    Explicit paths (`/`, `~/`, `./`, `../`) remain permissive so filenames with spaces work.
+// 2. Bare relative files: `output/foo.md`, `src/views/App.tsx`, etc. These must contain
+//    a slash and a file extension, keeping prose and URLs out of the candidate set.
+// 3. Bare explicit paths: NO spaces allowed (whitespace terminates) to avoid greedy matches in prose.
 // Combined into one regex with two capture branches so `extractPathCandidates` and `segmentText`
-// both walk a single match list. Group 1 = wrapped capture, Group 2 = bare capture.
+// both walk a single match list. The first non-empty capture group is the raw path.
+// The broad-looking bare branch is still cheap: it requires slash + extension, then the
+// de-duped Rust-side existence check decides whether the candidate is actually interactive.
 // We intentionally skip Windows-style paths for now (KISS — codebase is darwin-only).
-const PATH_RE =
-  /(?:`((?:~\/|\/|\.{1,2}\/)[^`\n]+)`|「((?:~\/|\/|\.{1,2}\/)[^」\n]+)」|『((?:~\/|\/|\.{1,2}\/)[^』\n]+)』|"((?:~\/|\/|\.{1,2}\/)[^"\n]+)"|'((?:~\/|\/|\.{1,2}\/)[^'\n]+)'|(?:^|[\s(\[<])((?:~\/|\/|\.{1,2}\/)[^\s`'"<>)\]」』]+))/g;
+const EXPLICIT_PATH_PREFIX = String.raw`(?:~\/|\/|\.{1,2}\/)`;
+const URL_OR_FRAGMENT_PREFIX = String.raw`(?:[a-zA-Z][a-zA-Z0-9+.-]*:|#|\?)`;
+const FILE_EXTENSION = String.raw`\.[A-Za-z0-9][A-Za-z0-9._-]{0,15}`;
+
+function explicitPath(stopChars: string, allowSpaces: boolean) {
+  const whitespace = allowSpaces ? "" : String.raw`\s`;
+  return String.raw`${EXPLICIT_PATH_PREFIX}[^${whitespace}${stopChars}\n]+`;
+}
+
+function bareRelativeFile(stopChars: string) {
+  return String.raw`(?!${URL_OR_FRAGMENT_PREFIX})(?=[^\s${stopChars}\n]*\/)[^\s${stopChars}\n]+${FILE_EXTENSION}`;
+}
+
+function pathLike(stopChars: string) {
+  return String.raw`(?:${explicitPath(stopChars, true)}|${bareRelativeFile(stopChars)})`;
+}
+
+const BARE_STOP_CHARS = String.raw`\`'"<>)\]」』`;
+const barePathLike = String.raw`(?:${explicitPath(BARE_STOP_CHARS, false)}|${bareRelativeFile(BARE_STOP_CHARS)})`;
+// IDE-style location suffix: `:line`, `:line:col`, optional `(any-selector)` afterwards.
+// The selector is consumed so wrapped paths still parse, but it is not rendered as
+// part of the clickable path segment.
+const LOCATION_SUFFIX = String.raw`(?::\d+(?::\d+)?(?:\([^)\n]*\))?)?`;
+const PATH_RE = new RegExp([
+  String.raw`\`@?(${pathLike("`")}${LOCATION_SUFFIX})\``,
+  `「@?(${pathLike("」")}${LOCATION_SUFFIX})」`,
+  `『@?(${pathLike("』")}${LOCATION_SUFFIX})』`,
+  `"@?(${pathLike('"')}${LOCATION_SUFFIX})"`,
+  `'@?(${pathLike("'")}${LOCATION_SUFFIX})'`,
+  // Bare branch - `@` is treated as a leading sigil (IDE-style mention) and consumed before the path.
+  String.raw`(?:^|[\s(\[<])@?(${barePathLike}${LOCATION_SUFFIX})`,
+].join("|"), "g");
+
+// Strip IDE-style location decorations from a captured token to get the pure filesystem path.
+// Examples:
+//   foo.tsx              -> foo.tsx
+//   foo.tsx:217          -> foo.tsx
+//   foo.tsx:217:7        -> foo.tsx
+//   foo.tsx:217:7(div>a) -> foo.tsx
+const LOCATION_SUFFIX_RE = /:(\d+)(?::(\d+))?(?:\([^)\n]*\))?$/;
+export function stripPathDecorations(raw: string): string {
+  return raw.replace(LOCATION_SUFFIX_RE, "");
+}
+
+export function parseLocationSuffix(raw: string): { line?: number; column?: number } {
+  const m = raw.match(LOCATION_SUFFIX_RE);
+  if (!m || (!m[1] && !m[2])) return {};
+  return {
+    line: m[1] ? Number(m[1]) : undefined,
+    column: m[2] ? Number(m[2]) : undefined,
+  };
+}
+
+function stripSelectorDecoration(raw: string): string {
+  return raw.replace(/(:\d+(?::\d+)?)\([^)\n]*\)$/, "$1");
+}
 
 export interface PathHit {
   raw: string;
@@ -17,11 +75,16 @@ export interface PathHit {
 }
 
 function pickGroup(m: RegExpExecArray): string | null {
-  // First non-undefined of groups 1..6
-  for (let i = 1; i <= 6; i++) {
+  for (let i = 1; i < m.length; i++) {
     if (m[i] !== undefined) return m[i];
   }
   return null;
+}
+
+// Strip both prose punctuation tail and IDE location suffix to derive the filesystem path.
+function normalizeCaptured(raw: string): string {
+  // First drop any IDE-style ":line[:col](selector)" suffix; then prose punctuation.
+  return stripPathDecorations(raw).replace(/[,.;:!?)\]]+$/, "");
 }
 
 export function extractPathCandidates(text: string): string[] {
@@ -31,7 +94,7 @@ export function extractPathCandidates(text: string): string[] {
   while ((m = PATH_RE.exec(text)) !== null) {
     const raw = pickGroup(m);
     if (!raw) continue;
-    const candidate = raw.replace(/[,.;:!?)\]]+$/, "");
+    const candidate = normalizeCaptured(raw);
     if (candidate.length >= 2) out.add(candidate);
   }
   return Array.from(out);
@@ -99,32 +162,41 @@ export async function checkPaths(paths: string[], cwd?: string): Promise<Map<str
 }
 
 // Split a string into [text|hit] segments, preserving order. Hit ranges come from a
-// non-overlapping list of {start, end, hit} sorted ascending by start.
+// non-overlapping list of {start, end, hit} sorted ascending by start. Line/column
+// are per-occurrence and parsed from the captured token's IDE-style suffix.
 export interface Segment {
   text: string;
   hit?: PathHit;
+  line?: number;
+  column?: number;
 }
 
 export function segmentText(text: string, hits: Map<string, PathHit>): Segment[] {
   if (hits.size === 0) return [{ text }];
 
-  type Range = { start: number; end: number; hit: PathHit };
+  type Range = { start: number; end: number; hit: PathHit; line?: number; column?: number };
   const ranges: Range[] = [];
   PATH_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = PATH_RE.exec(text)) !== null) {
     const rawCap = pickGroup(m);
     if (!rawCap) continue;
-    const raw = rawCap.replace(/[,.;:!?)\]]+$/, "");
-    const hit = hits.get(raw);
+    // Look up by normalized (stripped) path, but render only through `:line:col`.
+    // Keep a trailing DOM selector as plain text, not part of the clickable link.
+    const normalized = normalizeCaptured(rawCap);
+    const hit = hits.get(normalized);
     if (!hit) continue;
-    // Locate the captured path's start within the full match. We search for `raw` inside m[0]
-    // because the leading delimiter (if any) varies between branches.
-    const innerOffset = m[0].indexOf(raw);
+    const { line, column } = parseLocationSuffix(rawCap);
+    // Locate the captured token's start within the full match. We search for `rawCap`
+    // inside m[0] because the leading delimiter (if any) varies between branches.
+    const innerOffset = m[0].indexOf(rawCap);
     const start = m.index + (innerOffset >= 0 ? innerOffset : 0);
-    const end = start + raw.length;
+    const linkText = stripSelectorDecoration(rawCap);
+    // Trim trailing prose punctuation only (e.g., comma after the suffix), keep IDE line/column.
+    let end = start + linkText.length;
+    while (end > start && /[,.;!?]/.test(text[end - 1])) end--;
     if (ranges.length && ranges[ranges.length - 1].end > start) continue;
-    ranges.push({ start, end, hit });
+    ranges.push({ start, end, hit, line, column });
   }
 
   if (ranges.length === 0) return [{ text }];
@@ -133,7 +205,7 @@ export function segmentText(text: string, hits: Map<string, PathHit>): Segment[]
   let cursor = 0;
   for (const r of ranges) {
     if (r.start > cursor) segments.push({ text: text.slice(cursor, r.start) });
-    segments.push({ text: text.slice(r.start, r.end), hit: r.hit });
+    segments.push({ text: text.slice(r.start, r.end), hit: r.hit, line: r.line, column: r.column });
     cursor = r.end;
   }
   if (cursor < text.length) segments.push({ text: text.slice(cursor) });

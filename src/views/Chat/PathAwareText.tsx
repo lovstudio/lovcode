@@ -19,7 +19,7 @@ export function PathAwareText({ text, hits, highlight }: Props) {
       {segments.map((seg, i) => (
         <Fragment key={i}>
           {seg.hit ? (
-            <PathLink text={seg.text} hit={seg.hit} />
+            <PathLink text={seg.text} hit={seg.hit} line={seg.line} column={seg.column} />
           ) : (
             <HighlightText text={seg.text} query={highlight} />
           )}

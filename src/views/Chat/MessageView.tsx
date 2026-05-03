@@ -21,6 +21,7 @@ import { useAtom } from "jotai";
 import { originalChatAtom, markdownPreviewAtom } from "../../store";
 import { CollapsibleContent } from "./CollapsibleContent";
 import { ContentBlockRenderer } from "./ContentBlockRenderer";
+import { ChatFilePreviewProvider } from "./FilePreviewContext";
 import { ExportDialog } from "./ExportDialog";
 import { useReadableText } from "./utils";
 import { useAppConfig } from "../../context";
@@ -86,8 +87,9 @@ export function MessageView({ projectId, projectPath, sessionId, summary: initia
   }
 
   return (
-    <div className="px-6 py-8">
-      <header className="mb-8">
+    <ChatFilePreviewProvider>
+      <div className="h-full min-h-0 overflow-y-auto px-6 py-8">
+        <header className="mb-8">
         <nav className="flex items-center gap-1.5 text-sm mb-4">
           <button
             onClick={onBack}
@@ -143,54 +145,55 @@ export function MessageView({ projectId, projectPath, sessionId, summary: initia
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
-      </header>
+        </header>
 
-      <div className="space-y-4">
-        {filteredMessages.map((msg) => {
-          const displayContent = processContent(msg.content);
-          return (
-            <div
-              key={msg.uuid}
-              className={`group relative rounded-xl p-4 ${
-                msg.role === "user" ? "bg-card-alt" : "bg-card border border-border"
-              }`}
-            >
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <button className="absolute top-3 right-3 p-1.5 rounded-md bg-card-alt/80 hover:bg-card-alt text-muted-foreground hover:text-ink transition-opacity opacity-0 group-hover:opacity-100">
-                    <DotsHorizontalIcon width={16} />
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem onClick={() => handleCopyContent(displayContent)}>
-                    <Copy size={14} />
-                    Copy Content
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => handleCopyFileLine(msg.line_number)}>
-                    <FileCode size={14} />
-                    Copy file:line
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-              <p className="text-xs text-muted-foreground-foreground mb-2 uppercase tracking-wide">{msg.role}</p>
-              {msg.content_blocks && !originalChat ? (
-                <ContentBlockRenderer blocks={msg.content_blocks} markdown={markdownPreview} cwd={projectPath} />
-              ) : (
-                <CollapsibleContent content={displayContent} markdown={markdownPreview} cwd={projectPath} />
-              )}
-            </div>
-          );
-        })}
+        <div className="space-y-4">
+          {filteredMessages.map((msg) => {
+            const displayContent = processContent(msg.content);
+            return (
+              <div
+                key={msg.uuid}
+                className={`group relative rounded-xl p-4 ${
+                  msg.role === "user" ? "bg-card-alt" : "bg-card border border-border"
+                }`}
+              >
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button className="absolute top-3 right-3 p-1.5 rounded-md bg-card-alt/80 hover:bg-card-alt text-muted-foreground hover:text-ink transition-opacity opacity-0 group-hover:opacity-100">
+                      <DotsHorizontalIcon width={16} />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem onClick={() => handleCopyContent(displayContent)}>
+                      <Copy size={14} />
+                      Copy Content
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => handleCopyFileLine(msg.line_number)}>
+                      <FileCode size={14} />
+                      Copy file:line
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                <p className="text-xs text-muted-foreground-foreground mb-2 uppercase tracking-wide">{msg.role}</p>
+                {msg.content_blocks && !originalChat ? (
+                  <ContentBlockRenderer blocks={msg.content_blocks} markdown={markdownPreview} cwd={projectPath} />
+                ) : (
+                  <CollapsibleContent content={displayContent} markdown={markdownPreview} cwd={projectPath} />
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        <ExportDialog
+          open={exportDialogOpen}
+          onOpenChange={setExportDialogOpen}
+          allMessages={filteredMessages}
+          selectedIds={selectedIds}
+          onSelectedIdsChange={setSelectedIds}
+          defaultName={initialSummary?.slice(0, 50).replace(/[/\\?%*:|"<>]/g, "-") || "session"}
+        />
       </div>
-
-      <ExportDialog
-        open={exportDialogOpen}
-        onOpenChange={setExportDialogOpen}
-        allMessages={filteredMessages}
-        selectedIds={selectedIds}
-        onSelectedIdsChange={setSelectedIds}
-        defaultName={initialSummary?.slice(0, 50).replace(/[/\\?%*:|"<>]/g, "-") || "session"}
-      />
-    </div>
+    </ChatFilePreviewProvider>
   );
 }

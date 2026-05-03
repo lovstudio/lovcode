@@ -10142,7 +10142,7 @@ struct DirEntry {
     is_dir: bool,
 }
 
-/// Get file metadata (size, modified time)
+/// Get file metadata (size, modified time, is_dir)
 #[tauri::command]
 fn get_file_metadata(path: String) -> Result<FileMetadata, String> {
     let file_path = PathBuf::from(&path);
@@ -10163,6 +10163,7 @@ fn get_file_metadata(path: String) -> Result<FileMetadata, String> {
     Ok(FileMetadata {
         size: metadata.len(),
         modified,
+        is_dir: metadata.is_dir(),
     })
 }
 
@@ -10170,6 +10171,7 @@ fn get_file_metadata(path: String) -> Result<FileMetadata, String> {
 struct FileMetadata {
     size: u64,
     modified: Option<u64>,
+    is_dir: bool,
 }
 
 /// Read file contents
