@@ -101,7 +101,8 @@ export default function RootLayout() {
 
   useEffect(() => {
     const path = location.pathname + location.search;
-    if (path && path !== "/") {
+    // Skip transient overlay routes — they shouldn't be the "resume" target
+    if (path && path !== "/" && location.pathname !== "/annual-report-2025") {
       try { localStorage.setItem("lovcode:lastPath", path); } catch {}
     }
   }, [location.pathname, location.search]);

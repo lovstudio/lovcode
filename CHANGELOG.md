@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.30.1
+
+### Patch Changes
+
+- 修复 dev 模式下偶发的 `[TAURI] Couldn't find callback id` 警告：
+
+  - StatusBar 的 `get_network_info` 调用从挂载即触发改为下一个宏任务，HMR full-reload 期间几乎不会再撞上 5 秒 in-flight invoke。
+  - `NETWORK_INFO_CACHE` 增加磁盘持久化（`~/.lovstudio/lovcode/cache/network.json`），dev 重启 Rust 进程不再丢缓存。
+
+  附带修复：annual-report-2025 路由不再被记录为 lastPath 恢复目标。
+
 ## 0.30.0
 
 ### Minor Changes

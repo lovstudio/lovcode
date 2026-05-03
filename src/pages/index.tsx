@@ -5,7 +5,7 @@ const LAST_PATH_KEY = "lovcode:lastPath";
 function getLastPath(): string {
   try {
     const saved = localStorage.getItem(LAST_PATH_KEY);
-    if (saved && saved !== "/" && saved.startsWith("/")) return saved;
+    if (saved && saved !== "/" && saved.startsWith("/") && saved !== "/annual-report-2025") return saved;
   } catch {}
   return "/workspace";
 }

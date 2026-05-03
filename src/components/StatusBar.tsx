@@ -244,27 +244,23 @@ export function StatusBar({ onOpenSettings }: StatusBarProps) {
     };
   }, [settings, context]);
 
-  // Fetch network info (only for default mode)
+  // Fetch network info (only for default mode).
+  // Defer to next macrotask so an HMR full-reload arriving mid-startup
+  // doesn't leave a 5s in-flight invoke whose callback ID is gone after reload
+  // (source of "[TAURI] Couldn't find callback id ..." dev warning).
   useEffect(() => {
-    if (settings?.enabled) return; // Skip if script mode
+    if (settings?.enabled) return;
 
-    async function fetchNetworkInfo() {
-      try {
-        const res = await fetch("https://ipinfo.io/json");
-        if (res.ok) {
-          const data = await res.json();
-          setNetworkInfo({
-            region: data.city ? `${data.city}, ${data.country}` : data.country || "Unknown",
-            ip: data.ip || "",
-            isProxy: data.privacy?.proxy || data.privacy?.vpn || false,
-            proxyType: data.privacy?.vpn ? "VPN" : data.privacy?.proxy ? "Proxy" : undefined,
-          });
-        }
-      } catch {
-        // Silently fail
-      }
-    }
-    fetchNetworkInfo();
+    let cancelled = false;
+    const handle = window.setTimeout(() => {
+      invoke<NetworkInfo>("get_network_info")
+        .then((info) => { if (!cancelled) setNetworkInfo(info); })
+        .catch(() => {});
+    }, 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+    };
   }, [settings?.enabled]);
 
   const formatTime = useCallback((d: Date) => {
