@@ -35,14 +35,15 @@
 
 ## Release Highlights
 
-### v0.31.0 — Page-Centric Refactor
+### v0.32.0 — Inline File Preview
 
-Workspace dashboard removed in favor of a flat, page-centric router. `/chat/*` is now `/history/*`; knowledge sources moved from a static reference page to dynamic `/knowledge/source/[id]` routes. Session list streams instead of blocking on a full scan, and the splash now waits for the first list page to actually be ready.
+Local paths in prompts and chat messages now open inside Lovcode with a resizable preview pane. File references with `:line:column` jump directly to the target location, global search has scoped modes for text, IDs, and metadata, and document sidebars can be resized and restored.
 
 <img src="docs/images/claude-ai-import.png" alt="Claude.ai Import" width="100%">
 
 | Version | Highlights |
 |---------|------------|
+| **0.32.0** | Inline file preview for local path links with line/column reveal, directory browsing, and resizable preview pane; prompt path detection handles `@src/file.tsx:line:column(selector)` style references; global search gains All / Full text / Session ID / Details modes; document reader sidebars are now resizable and persisted |
 | **0.31.0** | Architecture refactor: removed Workspace dashboard (PanelGrid, FeatureTabs, KanbanBoard, GitHistory, LogoManager, ProjectDashboard) in favor of page-centric routing; `/chat/*` → `/history/*`; `/knowledge/reference` (static) → `/knowledge/source/[id]` (dynamic) with `[...docPath]` sub-routes; new `useStreamedSessions` hook for streamed session list rendering; splash now waits for `/history` `ProjectList` `app:ready` signal before dismissing; LLM provider settings page removed |
 | **0.30.1** | Patch: silence dev-mode `[TAURI] Couldn't find callback id` warnings — defer `get_network_info` to next macrotask, persist `NETWORK_INFO_CACHE` to `~/.lovstudio/lovcode/cache/network.json` so dev restarts keep the cache; annual-report-2025 no longer recorded as `lastPath` resume target |
 | **0.30.0** | Chat session list & global search overhaul: `readLiteMetadata`-aligned head/tail 64KB title scanner with `title_source` field surfaced as a multi-purpose dot in the list (custom black / AI terracotta / summary blue / slug green / prompt grey / none faded); fix consecutive same-role user messages being merged; built-in slash commands (`/clear`, etc.) now format correctly even with reordered `<command-name>` tags; new `GlobalChatSearch` overlay + `search-overlay` route for cross-session full-text search; double-click a user prompt opens it in a standalone `prompt-detail` webview; Recent header toolbar always visible (`SlidersHorizontal` icon); session metadata extraction switched from full-JSON parse to byte-level scan, dramatically faster on tens-of-MB sessions |
@@ -65,12 +66,12 @@ Workspace dashboard removed in favor of a flat, page-centric router. `/chat/*` i
 
 ## Features
 
-- **Chat History Viewer** — Browse and search conversation history across all projects with full-text search (Chinese + English)
+- **Chat History Viewer** — Browse and search conversation history across all projects with scoped full-text, session ID, and metadata search modes
 - **Granular Data Sources** — Switch between `cli` (Claude Code) / `app-code` / `app-web` / `app-cowork` with two-level tabs
 - **Live claude.ai Sync** — Pull web conversations directly via decrypted cookies (no manual export needed); also supports `.zip` / directory import
 - **Continue From the Bottom** — Reply to a session inline without leaving the detail view
 - **Rich Markdown Rendering** — GFM tables and syntax-highlighted code blocks (Warm Academic theme) inside chat messages
-- **Smart Path Links** — Bare paths *and* markdown `[text](path)` links are existence-checked against the session `cwd`; matches open in editor / Finder via right-click menu
+- **Smart Path Links** — Bare paths, prompt mentions, and markdown `[text](path)` links are existence-checked against the session `cwd`; matches open in a Lovcode preview pane, editor, or Finder
 - **Live Context-Window Readout** — Session detail footer shows the active model, provider, and peak context-window occupancy (input + cache_read + cache_creation) per round
 - **Structured Content Blocks** — Tool calls, thinking, and tool results rendered as first-class blocks
 - **Sidebar with Pinned / Recent / Import** — Tri-state Pinned toggle mirrored to Claude desktop `starredIds`; Algolia-style ⌘K search

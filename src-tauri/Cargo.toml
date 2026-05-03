@@ -1,6 +1,6 @@
 [package]
 name = "lovcode"
-version = "0.31.0"
+version = "0.32.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -55,4 +55,3 @@ rayon = "1.12.0"
 cocoa = "0.26"
 objc = "0.2"
 security-framework = "3"
-
