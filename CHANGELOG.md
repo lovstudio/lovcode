@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.30.0
+
+### Minor Changes
+
+- 1df7647: Chat session 列表与全局搜索增强：
+
+  - **Session 标题机制重构**（对齐 Claude Code 源码 `readLiteMetadata`）：后端 head/tail 64KB 双窗口扫描，按优先级识别 `customTitle` → `aiTitle` → `slug` → `summary` → `lastPrompt`，新增 `title_source` 字段透出来源类型。前端用一颗多用途圆点表达「来源 + 是否置顶」（custom 黑、AI 陶土、summary 蓝、slug 绿、prompt 浅灰、none 极浅灰），无 badge 文字干扰；prompt/none 来源走 italic + 灰提示「此为兜底」。
+  - **修复连续 user 消息被合并显示的 bug**：`groupConsecutiveByRole` 不再把同 role 的 user 消息合并成一组，每条独占。
+  - **`/clear` 等内置 slash command 正确格式化**：`restoreSlashCommand` 支持 `<command-name>` 在前的乱序结构；同时清理 `<local-command-{caveat,stdout,stderr}>` 内部 tag。
+  - **全局聊天搜索**：新增 `GlobalChatSearch` + `search-overlay` 路由，跨 session 全文搜索。
+  - **Prompt 详情独立窗口**：双击 user prompt 在独立 webview 窗口打开（`prompt-detail` 路由），方便长 prompt 阅读。
+  - **Recent header 工具栏常驻可见**：图标改为 `SlidersHorizontal`（语义匹配「分组/排序/过滤」），不再仅在 hover 显示。
+  - **Session 列表项右侧 round 数移除**：减少视觉噪音，详情 header 仍保留。
+  - **Features view 改造**：`VerticalFeatureTabs` + `FeaturesLayout` + `FeaturesView` 重构。
+  - **底层性能**：session 列表元数据从「全文件全量 JSON 解析」改为「128KB 字节级扫描 + 单次 substring 全扫做 round 计数」，对几十 MB 的长 session 文件显著加速。
+
 ## 0.29.0
 
 ### Minor Changes
